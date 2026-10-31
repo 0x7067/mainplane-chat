@@ -37,7 +37,7 @@ type bridge struct {
 func main() {
 	b := &bridge{
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
-		key:       mustEnv("MAINPLANE_KEY"),
+		key:       secret(mustEnv("MAINPLANE_KEY")),
 		following: map[string]bool{},
 	}
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
@@ -350,6 +350,15 @@ func split(text string, max int) []string {
 		parts = append(parts, part)
 	}
 	return parts
+}
+
+// secret is the bearer part of a harness token, mp_key_<harness>.<secret>; a
+// bare secret passes through.
+func secret(token string) string {
+	if _, s, ok := strings.Cut(token, "."); ok && strings.HasPrefix(token, "mp_key_") {
+		return s
+	}
+	return token
 }
 
 func mustEnv(k string) string {
