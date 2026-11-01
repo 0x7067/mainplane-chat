@@ -612,6 +612,7 @@ func (b *bridge) post(thread, id, msgID, text string) {
 		b.say(thread, "send failed: "+err.Error())
 		return
 	}
+	b.mark(thread, msgID, seen)
 	b.follow(thread, id, out.N-1) // from the message itself, the reply's target
 }
 
@@ -675,6 +676,7 @@ func (b *bridge) follow(thread, id string, n int) {
 				case statefile.Message:
 					if r.Via == via && snowflake(r.IdempotencyKey) {
 						t.key = r.IdempotencyKey
+						t.asked = append(t.asked, r.IdempotencyKey)
 					}
 					if r.Via != via && strings.HasPrefix(r.Type, "text/plain") {
 						b.say(thread, quote(r.Via, string(r.Body)))
@@ -727,6 +729,7 @@ func (b *bridge) follow(thread, id string, n int) {
 type turn struct {
 	start     time.Time
 	key       string   // the Discord message the reply answers, if any
+	asked     []string // the Discord messages of the turn, to mark done
 	calls     int      // tool calls so far
 	stepCalls int      // calls of the step not yet closed
 	last      []string // the newest call lines
@@ -781,8 +784,15 @@ func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 			log.Printf("status %s: %v", id, err)
 		}
 	}
-	text, key := strings.Join(t.text, "\n\n"), t.key
+	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	*t = turn{}
+	result := done
+	if outcome != "" {
+		result = failed
+	}
+	for _, m := range asked {
+		b.mark(thread, m, result)
+	}
 	if text == "" {
 		return
 	}
@@ -810,6 +820,41 @@ func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 		if _, err := b.dc.ChannelMessageSendComplex(thread, msg); err != nil {
 			log.Printf("discord send: %v", err)
 		}
+	}
+}
+
+// The bot's reaction on a message the session was sent: seen while the
+// agent works on it, then done or failed. The start messages in a channel
+// show at a glance how each session's last turn went.
+const (
+	seen   = "👀"
+	done   = "✅"
+	failed = "❌"
+)
+
+// mark sets the bot's reaction on Discord message msgID, sent in the thread,
+// or in its parent channel when it is the thread's starter, whose id the
+// thread has. Any other reaction leaves seen's place.
+func (b *bridge) mark(thread, msgID, emoji string) {
+	if !snowflake(msgID) {
+		return
+	}
+	ch := thread
+	if msgID == thread {
+		th, err := b.dc.State.Channel(thread)
+		if err != nil {
+			if th, err = b.dc.Channel(thread); err != nil {
+				log.Printf("mark %s: %v", msgID, err)
+				return
+			}
+		}
+		ch = th.ParentID
+	}
+	if emoji != seen {
+		_ = b.dc.MessageReactionRemove(ch, msgID, seen, "@me")
+	}
+	if err := b.dc.MessageReactionAdd(ch, msgID, emoji); err != nil {
+		log.Printf("mark %s: %v", msgID, err)
 	}
 }
 
