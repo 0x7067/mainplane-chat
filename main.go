@@ -517,7 +517,7 @@ func (b *bridge) listModels(thread, id string) error {
 }
 
 // modelPicker is a select of the connected models, this session's chosen;
-// picking one is /model with it. Discord shows at most 25.
+// picking one is /model with it. Discord shows at most 25, the current first.
 func (b *bridge) modelPicker(id string) ([]discordgo.MessageComponent, error) {
 	cat, ids, err := b.models()
 	if err != nil {
@@ -525,6 +525,9 @@ func (b *bridge) modelPicker(id string) ([]discordgo.MessageComponent, error) {
 	}
 	cur, _ := b.info(id)
 	var opts []discordgo.SelectMenuOption
+	if i := slices.Index(ids, cur.Config.Preset); i > 0 {
+		ids = slices.Concat(ids[i:i+1], ids[:i], ids[i+1:]) // first, so it is within the 25
+	}
 	for _, m := range ids[:min(len(ids), 25)] {
 		opts = append(opts, discordgo.SelectMenuOption{Label: cmp.Or(cat.Presets[m].Name, m), Value: m, Description: m, Default: m == cur.Config.Preset})
 	}
