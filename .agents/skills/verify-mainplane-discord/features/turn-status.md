@@ -1,6 +1,6 @@
 # Turn status
 
-While the agent works on a turn, the thread shows one status message, edited in place: `**working** · started <t:…:R> · N calls`, the last three call lines, and a Stop button (`stop:<session id>`). At the end of the turn it becomes `-# N calls · 2m31s · 38% context`, or `-# failed after N calls · …` on an error, with no button. Text the agent writes between calls goes out as plain messages; the final text goes out as a Discord reply to the message that began the turn. A turn with no calls has no status message.
+While the agent works on a turn, the thread shows one status message, edited in place: `**working** · started <t:…:R> · N calls`, the last three call lines, and a Stop button (`stop:<session id>`). At the end of the turn it becomes `-# N calls · 2m31s · 38% context`, or `-# failed after N calls · …` on an error (`stopped after` on a stop), with no button. Text the agent writes between calls goes out as plain messages; the final text goes out as a Discord reply to the message that began the turn. A turn with no calls has no status message.
 
 ## Sub-features
 
@@ -14,7 +14,7 @@ While the agent works on a turn, the thread shows one status message, edited in 
 
 - **Status.** In a thread, send `run "sleep 20; echo hi" on admin twice, then reply with the word done`. While it runs, `scripts/discord.sh "/channels/<thread id>/messages?limit=3" | jq '.[] | {content, components}'` shows the status with the Stop button, edited (`edited_timestamp`) as calls come. After, `scripts/thread.sh <thread id> 5` shows `-# 2 calls · …` and `done`, and no `-# run on admin` lines.
 - **Reply.** The `done` message has `message_reference.message_id` equal to the id `say.sh` printed.
-- **Stop.** Send a long task (`run "sleep 120" on admin`), then `!stop`. The status becomes `-# failed after 1 calls · …`, then the stop notice.
+- **Stop.** Send a long task (`run "sleep 120" on admin`), then `!stop`. The status becomes `-# stopped after 1 call · …`, then the stop notice.
 
 ## Gotchas
 

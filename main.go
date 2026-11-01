@@ -690,7 +690,11 @@ func (b *bridge) follow(thread, id string, n int) {
 						}
 					}
 				case statefile.Error:
-					b.finish(thread, id, &t, "failed")
+					outcome := "failed"
+					if r.Via != "" { // who stopped it
+						outcome = "stopped"
+					}
+					b.finish(thread, id, &t, outcome)
 					if contextFull(string(r.Body)) && b.shows(thread, id) {
 						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
 						b.relayed(id, r.N)
@@ -734,7 +738,7 @@ type turn struct {
 // showStatus posts or edits the turn's status message: when it started, in a
 // timestamp Discord keeps live, the calls, and a Stop button.
 func (b *bridge) showStatus(thread, id string, t *turn) {
-	content := fmt.Sprintf("**working** · started <t:%d:R> · %d calls", t.start.Unix(), t.calls)
+	content := fmt.Sprintf("**working** · started <t:%d:R> · %s", t.start.Unix(), calls(t.calls))
 	for _, l := range t.last {
 		content += "\n-# " + l
 	}
@@ -761,13 +765,14 @@ func (b *bridge) showStatus(thread, id string, t *turn) {
 
 // finish ends the turn: the status message shrinks to one line, and the
 // waiting text goes out as a reply to the message that began the turn. A
-// reply after a long turn notifies its author. outcome is "" or "failed".
+// reply after a long turn notifies its author. outcome is "", "failed" or
+// "stopped".
 func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 	took := time.Since(t.start).Round(time.Second)
 	if t.status != "" {
-		line := fmt.Sprintf("-# %d calls · %s", t.calls, took)
+		line := fmt.Sprintf("-# %s · %s", calls(t.calls), took)
 		if outcome != "" {
-			line = fmt.Sprintf("-# %s after %d calls · %s", outcome, t.calls, took)
+			line = fmt.Sprintf("-# %s after %s · %s", outcome, calls(t.calls), took)
 		} else if i, err := b.info(id); err == nil && i.Config.ContextLimit > 0 {
 			line += fmt.Sprintf(" · %d%% context", i.ContextUsed*100/i.Config.ContextLimit)
 		}
@@ -806,6 +811,14 @@ func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 			log.Printf("discord send: %v", err)
 		}
 	}
+}
+
+// calls is "1 call" or "n calls".
+func calls(n int) string {
+	if n == 1 {
+		return "1 call"
+	}
+	return fmt.Sprintf("%d calls", n)
 }
 
 // snowflake is whether s is a Discord id, as a message's idempotency key is
