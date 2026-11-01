@@ -49,6 +49,7 @@ type bridge struct {
 
 	mu        sync.Mutex
 	following map[string]bool // session ids with a follower running
+	sessions  string          // the #sessions channel, where sessions made outside Discord get threads
 	st        state
 }
 
@@ -58,6 +59,9 @@ type state struct {
 	Seen    map[string]string `json:"seen"`    // channel or thread id -> newest Discord message handled
 	Relayed map[string]int    `json:"relayed"` // session id -> newest record relayed
 	Threads map[string]string `json:"threads"` // thread id -> the session it shows
+	// MirrorSince is when mirroring began: sessions made outside Discord after
+	// it get a thread in #sessions; older ones do not.
+	MirrorSince time.Time `json:"mirror_since"`
 }
 
 type info struct {
@@ -93,7 +97,7 @@ func main() {
 	}
 	defer dc.Close()
 	log.Print("connected")
-	go b.watchContinuations()
+	go b.watchSessions()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -119,6 +123,11 @@ func (b *bridge) onReady(s *discordgo.Session, r *discordgo.Ready) {
 			for _, c := range cs {
 				if c.Type == discordgo.ChannelTypeGuildText {
 					chans = append(chans, c)
+					if c.Name == "sessions" {
+						b.mu.Lock()
+						b.sessions = c.ID
+						b.mu.Unlock()
+					}
 				}
 			}
 		}
@@ -374,17 +383,19 @@ func continued(msg string) string {
 	return ""
 }
 
-// watchContinuations moves a thread to a session that continues the one it
-// shows, wherever the continuation was made. Mainplane has no event for a new
-// session, so this reads the list every few seconds, as the terminal app's
-// sidebar does. A session is checked once it has its first message; only
-// sessions made in the last day are.
-func (b *bridge) watchContinuations() {
+// watchSessions keeps Discord in step with sessions made anywhere. A session
+// that continues one a thread shows moves that thread to it; one made outside
+// Discord after mirroring began gets its own thread in #sessions. Mainplane
+// has no event for a new session, so this reads the list every few seconds,
+// as the terminal app's sidebar does. A session is checked once it has its
+// first message; only sessions made in the last day are.
+func (b *bridge) watchSessions() {
 	checked := map[string]bool{}
 	for ; ; time.Sleep(3 * time.Second) {
 		var infos []struct {
 			ID      string
 			Created time.Time
+			Config  statefile.Conf
 		}
 		if err := b.call("GET", "/sessions?limit=20", "", nil, &infos); err != nil {
 			log.Printf("sessions: %v", err)
@@ -394,35 +405,81 @@ func (b *bridge) watchContinuations() {
 			if checked[in.ID] || time.Since(in.Created) > 24*time.Hour {
 				continue
 			}
-			first, ok := b.firstMessage(in.ID)
+			first, via, ok := b.firstMessage(in.ID)
 			if !ok {
 				continue
 			}
-			checked[in.ID] = true
-			old := continued(first)
-			if old == "" {
+			if old := continued(first); old != "" {
+				if threads := b.threadsShowing(old); len(threads) > 0 {
+					checked[in.ID] = true
+					for _, thread := range threads {
+						b.follow(thread, in.ID, 0)
+						b.say(thread, "-# continued in session "+in.ID)
+					}
+					continue
+				}
+			}
+			b.mu.Lock()
+			channel, since := b.sessions, b.st.MirrorSince
+			b.mu.Unlock()
+			if !mirrored(via, in.Created, since) || len(b.threadsShowing(in.ID)) > 0 {
+				checked[in.ID] = true
 				continue
 			}
-			for _, thread := range b.threadsShowing(old) {
-				b.follow(thread, in.ID, 0)
-				b.say(thread, "-# continued in session "+in.ID)
+			if channel == "" {
+				continue // #sessions not found yet; check again
 			}
+			checked[in.ID] = true
+			b.mirror(channel, in.ID, via, in.Config.Model, first)
 		}
 	}
 }
 
-// firstMessage is the body of the session's first message, if it has one.
-func (b *bridge) firstMessage(id string) (string, bool) {
+// mirrored is whether a session gets a thread in #sessions: its first
+// message came from outside Discord, after mirroring began.
+func mirrored(from string, created, since time.Time) bool {
+	return from != via && created.After(since)
+}
+
+// mirror makes a thread in #sessions for a session made outside Discord and
+// follows it from its start, its first message included.
+func (b *bridge) mirror(channel, id, via, model, first string) {
+	m, err := b.dc.ChannelMessageSendComplex(channel, &discordgo.MessageSend{
+		Content:         fmt.Sprintf("`%s` · via %s · %s", id, via, model),
+		AllowedMentions: &discordgo.MessageAllowedMentions{},
+	})
+	if err != nil {
+		log.Printf("mirror %s: %v", id, err)
+		return
+	}
+	th, err := b.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(first, 80), AutoArchiveDuration: 10080})
+	if err != nil {
+		log.Printf("mirror %s: %v", id, err)
+		return
+	}
+	b.follow(th.ID, id, 0)
+}
+
+// quote shows a message sent from outside Discord in a thread, with where it
+// came from: "> **cli:** fix the build".
+func quote(via, body string) string {
+	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
+	lines[0] = "**" + via + ":** " + lines[0]
+	return "> " + strings.Join(lines, "\n> ")
+}
+
+// firstMessage is the session's first message and who sent it, if it has one.
+func (b *bridge) firstMessage(id string) (body, via string, ok bool) {
 	recs, err := b.records(id, 0, "")
 	if err != nil {
-		return "", false
+		return "", "", false
 	}
 	for _, r := range recs {
 		if r.Kind == statefile.Message {
-			return string(r.Body), true
+			return string(r.Body), r.Via, true
 		}
 	}
-	return "", false
+	return "", "", false
 }
 
 func (b *bridge) threadsShowing(id string) []string {
@@ -572,6 +629,12 @@ func (b *bridge) follow(thread, id string, n int) {
 			var refused *refusedError
 			if errors.As(err, &refused) {
 				log.Printf("session %s: %v; no longer following it", id, err)
+				if refused.gone() && b.shows(thread, id) {
+					yes := true
+					if _, err := b.dc.ChannelEdit(thread, &discordgo.ChannelEdit{Archived: &yes, Locked: &yes}); err != nil {
+						log.Printf("archive thread %s: %v", thread, err)
+					}
+				}
 				return
 			}
 			if err != nil {
@@ -587,6 +650,10 @@ func (b *bridge) follow(thread, id string, n int) {
 				switch r.Kind {
 				case statefile.Text:
 					b.say(thread, string(r.Body))
+				case statefile.Message:
+					if r.Via != via && strings.HasPrefix(r.Type, "text/plain") {
+						b.say(thread, quote(r.Via, string(r.Body)))
+					}
 				case statefile.Error:
 					if contextFull(string(r.Body)) && b.shows(thread, id) {
 						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
@@ -692,6 +759,10 @@ func (b *bridge) load() {
 	if b.st.Threads == nil {
 		b.st.Threads = map[string]string{}
 	}
+	if b.st.MirrorSince.IsZero() {
+		b.st.MirrorSince = time.Now().UTC()
+		b.save()
+	}
 }
 
 // save writes the state; b.mu is held.
@@ -727,7 +798,7 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, &refusedError{resp.Status + ": " + strings.TrimSpace(string(msg))}
+		return nil, &refusedError{resp.StatusCode, resp.Status + ": " + strings.TrimSpace(string(msg))}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s", resp.Status)
@@ -747,9 +818,18 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 }
 
 // refusedError is a 4xx from the harness, which a retry does not mend.
-type refusedError struct{ msg string }
+type refusedError struct {
+	code int
+	msg  string
+}
 
 func (e *refusedError) Error() string { return e.msg }
+
+// gone is whether the session no longer exists, as after a delete, rather
+// than the call being refused for another reason, such as a revoked key.
+func (e *refusedError) gone() bool {
+	return e.code == http.StatusNotFound || strings.Contains(e.msg, "no such file")
+}
 
 func (b *bridge) info(id string) (info, error) {
 	var i info

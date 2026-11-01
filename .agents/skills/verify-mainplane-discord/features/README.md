@@ -26,4 +26,5 @@ The user-facing behavior of the mainplane-discord bot, one file per feature. Rea
 - [new-session.md](new-session.md): a channel message starts a session and its thread.
 - [thread-commands.md](thread-commands.md): /model, /continue, /retry, /stop, /info.
 - [continuations.md](continuations.md): a thread follows a continuation made in the terminal app.
+- [mirroring.md](mirroring.md): a session made outside Discord gets a thread in #sessions.
 - [catch-up.md](catch-up.md): what happened while the bot was down is picked up.

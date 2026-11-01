@@ -3,7 +3,8 @@
 Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a private Discord server.
 
 - A message in any channel starts a session in a new thread named `<session id> <first words>`. Its model is picked as the mainplane terminal app picks it (the newest session's, else the catalog's default, if its provider is connected); its workers are every connected worker.
-- Messages in that thread continue the session; the agent's replies and tool calls come back there.
+- A session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`, from when mirroring began, as Mainplane syncs sessions across every connector. Create a text channel named `sessions`; the bot finds it by name.
+- Messages in a thread continue the session; the agent's replies and tool calls come back there, and messages sent from elsewhere show quoted with their source (`> **cli:** …`). A thread whose session is deleted is archived and locked.
 - Thread commands, as in the terminal app and CLI (`!` works too):
   - `/model` lists the connected models; `/model <id> [message]` continues in a new session on that model, with the same workers. Use it when a provider's quota runs out.
   - `/continue [message]` continues in a new session with the same config.
