@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
@@ -78,6 +79,46 @@ func TestLastUnanswered(t *testing.T) {
 	} {
 		if got := lastUnanswered(c.recs); got != c.want {
 			t.Errorf("%s: lastUnanswered = %q, want %q", name, got, c.want)
+		}
+	}
+}
+
+func TestMirrored(t *testing.T) {
+	since := time.Date(2026, 11, 1, 15, 0, 0, 0, time.UTC)
+	after, before := since.Add(time.Minute), since.Add(-time.Minute)
+	for _, c := range []struct {
+		from    string
+		created time.Time
+		want    bool
+	}{{"cli", after, true}, {"tui", after, true}, {"discord", after, false}, {"cli", before, false}} {
+		if got := mirrored(c.from, c.created, since); got != c.want {
+			t.Errorf("mirrored(%q, %v) = %v", c.from, c.created, got)
+		}
+	}
+}
+
+func TestQuote(t *testing.T) {
+	for _, c := range []struct{ via, body, want string }{
+		{"cli", "fix the build", "> **cli:** fix the build"},
+		{"tui", "line one\nline two\n", "> **tui:** line one\n> line two"},
+	} {
+		if got := quote(c.via, c.body); got != c.want {
+			t.Errorf("quote(%q, %q) = %q, want %q", c.via, c.body, got, c.want)
+		}
+	}
+}
+
+func TestGone(t *testing.T) {
+	for _, c := range []struct {
+		err  refusedError
+		want bool
+	}{
+		{refusedError{400, "400 Bad Request: open /var/lib/mainplane-server/sessions/x.state: no such file or directory"}, true},
+		{refusedError{404, "404 Not Found"}, true},
+		{refusedError{401, "401 Unauthorized"}, false},
+	} {
+		if got := c.err.gone(); got != c.want {
+			t.Errorf("gone(%q) = %v", c.err.msg, got)
 		}
 	}
 }
