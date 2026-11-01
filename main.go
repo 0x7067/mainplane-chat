@@ -91,6 +91,7 @@ func main() {
 	}
 	defer dc.Close()
 	log.Print("connected")
+	go b.watchContinuations()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -305,16 +306,87 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 		msg += "\n" + text
 	}
 	b.post(th.ID, id, msgID, msg)
-	// The state file, not the name, says which session the thread shows, so
-	// the rename can wait out Discord's limit of about two per ten minutes
-	// without holding up other messages.
-	_, title, _ := strings.Cut(th.Name, " ")
-	go func() {
-		if _, err := b.dc.ChannelEdit(th.ID, &discordgo.ChannelEdit{Name: strings.TrimSpace(id + " " + title)}); err != nil {
-			log.Printf("rename thread %s: %v", th.ID, err)
-		}
-	}()
 	return nil
+}
+
+// continuePrefix starts the first message of a session that continues
+// another, from the terminal app's /model and /continue and from this bot's.
+const continuePrefix = "You are continuing session "
+
+// continued is the session a first message says it continues, or "".
+func continued(msg string) string {
+	rest, ok := strings.CutPrefix(msg, continuePrefix)
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, ".")
+	if statefile.ValidID(id) {
+		return id
+	}
+	return ""
+}
+
+// watchContinuations moves a thread to a session that continues the one it
+// shows, wherever the continuation was made. Mainplane has no event for a new
+// session, so this reads the list every few seconds, as the terminal app's
+// sidebar does. A session is checked once it has its first message; only
+// sessions made in the last day are.
+func (b *bridge) watchContinuations() {
+	checked := map[string]bool{}
+	for ; ; time.Sleep(3 * time.Second) {
+		var infos []struct {
+			ID      string
+			Created time.Time
+		}
+		if err := b.call("GET", "/sessions?limit=20", "", nil, &infos); err != nil {
+			log.Printf("sessions: %v", err)
+			continue
+		}
+		for _, in := range infos {
+			if checked[in.ID] || time.Since(in.Created) > 24*time.Hour {
+				continue
+			}
+			first, ok := b.firstMessage(in.ID)
+			if !ok {
+				continue
+			}
+			checked[in.ID] = true
+			old := continued(first)
+			if old == "" {
+				continue
+			}
+			for _, thread := range b.threadsShowing(old) {
+				b.follow(thread, in.ID, 0)
+				b.say(thread, "-# continued in session "+in.ID)
+			}
+		}
+	}
+}
+
+// firstMessage is the body of the session's first message, if it has one.
+func (b *bridge) firstMessage(id string) (string, bool) {
+	recs, err := b.records(id, 0, "")
+	if err != nil {
+		return "", false
+	}
+	for _, r := range recs {
+		if r.Kind == statefile.Message {
+			return string(r.Body), true
+		}
+	}
+	return "", false
+}
+
+func (b *bridge) threadsShowing(id string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var ts []string
+	for t, s := range b.st.Threads {
+		if s == id {
+			ts = append(ts, t)
+		}
+	}
+	return ts
 }
 
 // listModels is /model alone: the connected models, this session's marked.
@@ -445,7 +517,7 @@ func (b *bridge) follow(thread, id string, n int) {
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
 		for b.shows(thread, id) {
-			recs, err := b.records(id, n)
+			recs, err := b.records(id, n, "60s")
 			if err != nil {
 				log.Printf("session %s: %v", id, err)
 				time.Sleep(5 * time.Second)
@@ -574,8 +646,14 @@ func (b *bridge) save() {
 	}
 }
 
-func (b *bridge) records(id string, after int) ([]statefile.Record, error) {
-	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/sessions/%s/records?after=%d&wait=60s", b.harness, id, after), nil)
+// records reads the session's records after record after, long polling for
+// wait when there are none yet ("" returns at once).
+func (b *bridge) records(id string, after int, wait string) ([]statefile.Record, error) {
+	u := fmt.Sprintf("%s/sessions/%s/records?after=%d", b.harness, id, after)
+	if wait != "" {
+		u += "&wait=" + wait
+	}
+	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+b.key)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

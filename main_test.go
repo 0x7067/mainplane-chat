@@ -32,3 +32,17 @@ func TestPickModel(t *testing.T) {
 		}
 	}
 }
+
+func TestContinued(t *testing.T) {
+	for msg, want := range map[string]string{
+		"You are continuing session 5b733adb. Retrieve key context from it as you go.":           "5b733adb",
+		"You are continuing session 5b733adb. Retrieve key context from it as you go.\nnow do X": "5b733adb",
+		"You are continuing session nope. x":                                                     "",
+		"please continue session 5b733adb":                                                       "",
+		"":                                                                                       "",
+	} {
+		if got := continued(msg); got != want {
+			t.Errorf("continued(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
