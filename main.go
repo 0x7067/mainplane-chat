@@ -45,10 +45,10 @@ type bridge struct {
 	harness string // base URL of the harness API
 	key     string
 	path    string // the state file
+	tester  string // a bot user id whose messages count as a person's, for end-to-end tests
 
 	mu        sync.Mutex
-	following map[string]bool   // session ids with a follower running
-	threads   map[string]string // thread id -> the session it shows
+	following map[string]bool // session ids with a follower running
 	st        state
 }
 
@@ -57,6 +57,7 @@ type bridge struct {
 type state struct {
 	Seen    map[string]string `json:"seen"`    // channel or thread id -> newest Discord message handled
 	Relayed map[string]int    `json:"relayed"` // session id -> newest record relayed
+	Threads map[string]string `json:"threads"` // thread id -> the session it shows
 }
 
 type info struct {
@@ -72,8 +73,8 @@ func main() {
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
 		path:      statePath(),
+		tester:    os.Getenv("MAINPLANE_DISCORD_TESTER"),
 		following: map[string]bool{},
-		threads:   map[string]string{},
 	}
 	b.load()
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
@@ -92,6 +93,7 @@ func main() {
 	}
 	defer dc.Close()
 	log.Print("connected")
+	go b.watchContinuations()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
@@ -105,7 +107,7 @@ func (b *bridge) onReady(s *discordgo.Session, r *discordgo.Ready) {
 		var chans []*discordgo.Channel
 		if threads, err := s.GuildThreadsActive(g.ID); err == nil {
 			for _, t := range threads.Threads {
-				if id := sessionOf(t.Name); id != "" {
+				if id := b.sessionFor(t); id != "" {
 					if n, ok := b.relayedFrom(id); ok {
 						b.follow(t.ID, id, n)
 					}
@@ -157,7 +159,7 @@ func (b *bridge) replay(c *discordgo.Channel) {
 func (b *bridge) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) { b.handle(m.Message) }
 
 func (b *bridge) handle(m *discordgo.Message) {
-	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot {
+	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != b.tester {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
@@ -300,10 +302,6 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 	if err != nil {
 		return err
 	}
-	_, title, _ := strings.Cut(th.Name, " ")
-	if _, err := b.dc.ChannelEdit(th.ID, &discordgo.ChannelEdit{Name: strings.TrimSpace(id + " " + title)}); err != nil {
-		return fmt.Errorf("session %s was made, but renaming the thread failed: %w", id, err)
-	}
 	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
 	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
 	if text != "" {
@@ -311,6 +309,86 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 	}
 	b.post(th.ID, id, msgID, msg)
 	return nil
+}
+
+// continuePrefix starts the first message of a session that continues
+// another, from the terminal app's /model and /continue and from this bot's.
+const continuePrefix = "You are continuing session "
+
+// continued is the session a first message says it continues, or "".
+func continued(msg string) string {
+	rest, ok := strings.CutPrefix(msg, continuePrefix)
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, ".")
+	if statefile.ValidID(id) {
+		return id
+	}
+	return ""
+}
+
+// watchContinuations moves a thread to a session that continues the one it
+// shows, wherever the continuation was made. Mainplane has no event for a new
+// session, so this reads the list every few seconds, as the terminal app's
+// sidebar does. A session is checked once it has its first message; only
+// sessions made in the last day are.
+func (b *bridge) watchContinuations() {
+	checked := map[string]bool{}
+	for ; ; time.Sleep(3 * time.Second) {
+		var infos []struct {
+			ID      string
+			Created time.Time
+		}
+		if err := b.call("GET", "/sessions?limit=20", "", nil, &infos); err != nil {
+			log.Printf("sessions: %v", err)
+			continue
+		}
+		for _, in := range infos {
+			if checked[in.ID] || time.Since(in.Created) > 24*time.Hour {
+				continue
+			}
+			first, ok := b.firstMessage(in.ID)
+			if !ok {
+				continue
+			}
+			checked[in.ID] = true
+			old := continued(first)
+			if old == "" {
+				continue
+			}
+			for _, thread := range b.threadsShowing(old) {
+				b.follow(thread, in.ID, 0)
+				b.say(thread, "-# continued in session "+in.ID)
+			}
+		}
+	}
+}
+
+// firstMessage is the body of the session's first message, if it has one.
+func (b *bridge) firstMessage(id string) (string, bool) {
+	recs, err := b.records(id, 0, "")
+	if err != nil {
+		return "", false
+	}
+	for _, r := range recs {
+		if r.Kind == statefile.Message {
+			return string(r.Body), true
+		}
+	}
+	return "", false
+}
+
+func (b *bridge) threadsShowing(id string) []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	var ts []string
+	for t, s := range b.st.Threads {
+		if s == id {
+			ts = append(ts, t)
+		}
+	}
+	return ts
 }
 
 // listModels is /model alone: the connected models, this session's marked.
@@ -424,10 +502,16 @@ func (b *bridge) post(thread, id, msgID, text string) {
 }
 
 // follow long-polls the session after record n and relays what the agent
-// says, until the thread shows another session.
+// says. Once the thread shows another session it goes on until this one has
+// been quiet for a poll, so a reply to a message sent before a quick /model
+// still arrives. It stops when the harness refuses the session, as for one
+// deleted.
 func (b *bridge) follow(thread, id string, n int) {
 	b.mu.Lock()
-	b.threads[thread] = id
+	if b.st.Threads[thread] != id {
+		b.st.Threads[thread] = id
+		b.save()
+	}
 	running := b.following[id]
 	b.following[id] = true
 	b.mu.Unlock()
@@ -437,12 +521,20 @@ func (b *bridge) follow(thread, id string, n int) {
 	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
-		for b.shows(thread, id) {
-			recs, err := b.records(id, n)
+		for {
+			recs, err := b.records(id, n, "60s")
+			var refused *refusedError
+			if errors.As(err, &refused) {
+				log.Printf("session %s: %v; no longer following it", id, err)
+				return
+			}
 			if err != nil {
 				log.Printf("session %s: %v", id, err)
 				time.Sleep(5 * time.Second)
 				continue
+			}
+			if len(recs) == 0 && !b.shows(thread, id) {
+				return
 			}
 			for _, r := range recs {
 				n = r.N
@@ -464,14 +556,14 @@ func (b *bridge) follow(thread, id string, n int) {
 func (b *bridge) shows(thread, id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.threads[thread] == id
+	return b.st.Threads[thread] == id
 }
 
-// sessionFor is the session a thread shows: the one it was moved to, else
-// the one its name starts with.
+// sessionFor is the session a thread shows: the one it was last moved to,
+// else the one its name starts with.
 func (b *bridge) sessionFor(th *discordgo.Channel) string {
 	b.mu.Lock()
-	id, ok := b.threads[th.ID]
+	id, ok := b.st.Threads[th.ID]
 	b.mu.Unlock()
 	if ok {
 		return id
@@ -545,6 +637,9 @@ func (b *bridge) load() {
 	if b.st.Relayed == nil {
 		b.st.Relayed = map[string]int{}
 	}
+	if b.st.Threads == nil {
+		b.st.Threads = map[string]string{}
+	}
 }
 
 // save writes the state; b.mu is held.
@@ -564,14 +659,24 @@ func (b *bridge) save() {
 	}
 }
 
-func (b *bridge) records(id string, after int) ([]statefile.Record, error) {
-	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/sessions/%s/records?after=%d&wait=60s", b.harness, id, after), nil)
+// records reads the session's records after record after, long polling for
+// wait when there are none yet ("" returns at once).
+func (b *bridge) records(id string, after int, wait string) ([]statefile.Record, error) {
+	u := fmt.Sprintf("%s/sessions/%s/records?after=%d", b.harness, id, after)
+	if wait != "" {
+		u += "&wait=" + wait
+	}
+	req, _ := http.NewRequest("GET", u, nil)
 	req.Header.Set("Authorization", "Bearer "+b.key)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return nil, &refusedError{resp.Status + ": " + strings.TrimSpace(string(msg))}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s", resp.Status)
 	}
@@ -588,6 +693,11 @@ func (b *bridge) records(id string, after int) ([]statefile.Record, error) {
 		recs = append(recs, r)
 	}
 }
+
+// refusedError is a 4xx from the harness, which a retry does not mend.
+type refusedError struct{ msg string }
+
+func (e *refusedError) Error() string { return e.msg }
 
 func (b *bridge) info(id string) (info, error) {
 	var i info
