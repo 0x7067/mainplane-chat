@@ -49,6 +49,7 @@ type bridge struct {
 
 	mu        sync.Mutex
 	following map[string]bool // session ids with a follower running
+	auto      map[string]bool // sessions made because the one before ran out of context
 	st        state
 }
 
@@ -75,6 +76,7 @@ func main() {
 		path:      statePath(),
 		tester:    os.Getenv("MAINPLANE_DISCORD_TESTER"),
 		following: map[string]bool{},
+		auto:      map[string]bool{},
 	}
 	b.load()
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
@@ -207,14 +209,14 @@ func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
 	case "info":
 		err = b.sayInfo(th.ID, id)
 	case "continue":
-		err = b.continueIn(th, id, msgID, "", rest)
+		_, err = b.continueIn(th, id, msgID, "", rest)
 	case "model":
 		if rest == "" {
 			err = b.listModels(th.ID, id)
 			break
 		}
 		model := strings.Fields(rest)[0]
-		err = b.continueIn(th, id, msgID, model, strings.TrimSpace(strings.TrimPrefix(rest, model)))
+		_, err = b.continueIn(th, id, msgID, model, strings.TrimSpace(strings.TrimPrefix(rest, model)))
 	default:
 		return false
 	}
@@ -280,27 +282,27 @@ func (b *bridge) newConf() (statefile.Conf, error) {
 // continueIn is /continue, and /model with a model: a new session with this
 // one's config, or the model's and this one's workers, told to carry on from
 // this one, as the terminal app does. The thread then shows the new session.
-func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) error {
+func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) (string, error) {
 	cur, err := b.info(old)
 	if err != nil {
-		return err
+		return "", err
 	}
 	conf := cur.Config
 	if model != "" {
 		cat, ids, err := b.models()
 		if err != nil {
-			return err
+			return "", err
 		}
 		id := pickModel(cat, ids, model)
 		if id == "" {
-			return fmt.Errorf("no connected model %q: /model lists them", model)
+			return "", fmt.Errorf("no connected model %q: /model lists them", model)
 		}
 		conf = presetConf(id, cat.Presets[id])
 		conf.Workers = cur.Config.Workers
 	}
 	id, err := b.create(conf)
 	if err != nil {
-		return err
+		return "", err
 	}
 	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
 	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
@@ -308,7 +310,42 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 		msg += "\n" + text
 	}
 	b.post(th.ID, id, msgID, msg)
-	return nil
+	return id, nil
+}
+
+// contextFull is whether an error record is the harness ending a session at
+// its context limit: "context 250009 exceeds limit 250000".
+func contextFull(body string) bool {
+	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
+}
+
+// continueFull is /continue, run by the bot when the thread's session ends at
+// its context limit, as Mainplane intends a full session to go on. It does
+// not run again for a session it made this way that filled up before
+// replying, which would only loop.
+func (b *bridge) continueFull(thread, id string, spoke bool) {
+	b.mu.Lock()
+	again := b.auto[id] && !spoke
+	b.mu.Unlock()
+	if again {
+		b.say(thread, "-# not continuing again: the last automatic continuation filled up before it replied. /continue or /model to go on")
+		return
+	}
+	th, err := b.dc.State.Channel(thread)
+	if err != nil {
+		if th, err = b.dc.Channel(thread); err != nil {
+			log.Printf("continue %s: %v", id, err)
+			return
+		}
+	}
+	next, err := b.continueIn(th, id, "context-full-"+id, "", "The session before ran out of context. Carry on where it stopped.")
+	if err != nil {
+		b.say(thread, "automatic /continue failed: "+err.Error())
+		return
+	}
+	b.mu.Lock()
+	b.auto[next] = true
+	b.mu.Unlock()
 }
 
 // continuePrefix starts the first message of a session that continues
@@ -521,6 +558,7 @@ func (b *bridge) follow(thread, id string, n int) {
 	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
+		spoke := false // the agent replied since this follower began
 		for {
 			recs, err := b.records(id, n, "60s")
 			var refused *refusedError
@@ -540,8 +578,15 @@ func (b *bridge) follow(thread, id string, n int) {
 				n = r.N
 				switch r.Kind {
 				case statefile.Text:
+					spoke = true
 					b.say(thread, string(r.Body))
 				case statefile.Error:
+					if contextFull(string(r.Body)) && b.shows(thread, id) {
+						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
+						b.relayed(id, r.N)
+						b.continueFull(thread, id, spoke)
+						continue
+					}
 					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
 				case statefile.Call:
 					_ = b.dc.ChannelTyping(thread)

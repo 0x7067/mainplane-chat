@@ -46,3 +46,16 @@ func TestContinued(t *testing.T) {
 		}
 	}
 }
+
+func TestContextFull(t *testing.T) {
+	for body, want := range map[string]bool{
+		"context 250009 exceeds limit 250000":                      true,
+		"context 8300 exceeds limit 8200":                          true,
+		"The session was stopped during the last step by discord.": false,
+		"anthropic: 529 overloaded":                                false,
+	} {
+		if got := contextFull(body); got != want {
+			t.Errorf("contextFull(%q) = %v", body, got)
+		}
+	}
+}
