@@ -9,6 +9,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -505,24 +506,34 @@ func (b *bridge) threadsShowing(id string) []string {
 	return ts
 }
 
-// listModels is /model alone: the connected models, this session's marked.
+// listModels is /model alone: a picker of the connected models.
 func (b *bridge) listModels(thread, id string) error {
-	cat, ids, err := b.models()
+	picker, err := b.modelPicker(id)
 	if err != nil {
 		return err
 	}
-	cur, _ := b.info(id)
-	var sb strings.Builder
-	sb.WriteString("`/model <id> [message]` continues in a new session on that model:\n")
-	for _, m := range ids {
-		sb.WriteString("`" + m + "` " + cat.Presets[m].Name)
-		if m == cur.Config.Preset {
-			sb.WriteString(" (current)")
-		}
-		sb.WriteString("\n")
-	}
-	b.say(thread, sb.String())
+	b.say(thread, "-# continue in a new session on another model, or `/model <id> [message]`", picker...)
 	return nil
+}
+
+// modelPicker is a select of the connected models, this session's chosen;
+// picking one is /model with it. Discord shows at most 25.
+func (b *bridge) modelPicker(id string) ([]discordgo.MessageComponent, error) {
+	cat, ids, err := b.models()
+	if err != nil {
+		return nil, err
+	}
+	cur, _ := b.info(id)
+	var opts []discordgo.SelectMenuOption
+	for _, m := range ids[:min(len(ids), 25)] {
+		opts = append(opts, discordgo.SelectMenuOption{Label: cmp.Or(cat.Presets[m].Name, m), Value: m, Description: m, Default: m == cur.Config.Preset})
+	}
+	if len(opts) == 0 {
+		return nil, errors.New("no provider of the catalog is connected")
+	}
+	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+		discordgo.SelectMenu{MenuType: discordgo.StringSelectMenu, CustomID: "model:" + id, Placeholder: "Continue on another model", Options: opts},
+	}}}, nil
 }
 
 func (b *bridge) sayInfo(thread, id string) error {
@@ -703,7 +714,14 @@ func (b *bridge) follow(thread, id string, n int) {
 						b.continueFull(thread, id, r.N)
 						continue
 					}
-					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
+					retry := discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+						discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: "retry:" + id},
+					}}
+					picker, err := b.modelPicker(id)
+					if err != nil {
+						log.Printf("models: %v", err)
+					}
+					b.say(thread, "⚠️ "+string(r.Body), append([]discordgo.MessageComponent{retry}, picker...)...)
 				case statefile.Call:
 					_ = b.dc.ChannelTyping(thread)
 					t.calls++
@@ -872,13 +890,18 @@ func snowflake(s string) bool {
 	return s != "" && strings.Trim(s, "0123456789") == ""
 }
 
-// onInteraction runs a button as the thread command it names: "stop:<id>"
-// is !stop on session id.
+// onInteraction runs a button or select as the thread command it names:
+// "stop:<id>" is !stop on session id, and "model:<id>" picking m is
+// !model m. The message the component is on stands for the person's.
 func (b *bridge) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent {
 		return
 	}
-	action, id, _ := strings.Cut(i.MessageComponentData().CustomID, ":")
+	data := i.MessageComponentData()
+	action, id, _ := strings.Cut(data.CustomID, ":")
+	for _, v := range data.Values {
+		action += " " + v
+	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
 		log.Printf("interaction: %v", err)
 	}
@@ -888,7 +911,7 @@ func (b *bridge) onInteraction(s *discordgo.Session, i *discordgo.InteractionCre
 			return
 		}
 	}
-	b.command(th, id, i.ID, "!"+action)
+	b.command(th, id, i.Message.ID, "!"+action)
 }
 
 func (b *bridge) shows(thread, id string) bool {
@@ -1084,13 +1107,18 @@ func (b *bridge) do(req *http.Request, out any) error {
 }
 
 // say sends text in Discord-sized pieces, with mentions and link previews off.
-func (b *bridge) say(channel, text string) {
-	for _, part := range split(text, 1900) {
-		_, err := b.dc.ChannelMessageSendComplex(channel, &discordgo.MessageSend{
+func (b *bridge) say(channel, text string, comps ...discordgo.MessageComponent) {
+	parts := split(text, 1900)
+	for i, part := range parts {
+		msg := &discordgo.MessageSend{
 			Content:         part,
 			AllowedMentions: &discordgo.MessageAllowedMentions{},
 			Flags:           discordgo.MessageFlagsSuppressEmbeds,
-		})
+		}
+		if i == len(parts)-1 {
+			msg.Components = comps
+		}
+		_, err := b.dc.ChannelMessageSendComplex(channel, msg)
 		if err != nil {
 			log.Printf("discord send: %v", err)
 		}
