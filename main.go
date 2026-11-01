@@ -47,8 +47,7 @@ type bridge struct {
 	path    string // the state file
 
 	mu        sync.Mutex
-	following map[string]bool   // session ids with a follower running
-	threads   map[string]string // thread id -> the session it shows
+	following map[string]bool // session ids with a follower running
 	st        state
 }
 
@@ -57,6 +56,7 @@ type bridge struct {
 type state struct {
 	Seen    map[string]string `json:"seen"`    // channel or thread id -> newest Discord message handled
 	Relayed map[string]int    `json:"relayed"` // session id -> newest record relayed
+	Threads map[string]string `json:"threads"` // thread id -> the session it shows
 }
 
 type info struct {
@@ -73,7 +73,6 @@ func main() {
 		key:       secret(mustEnv("MAINPLANE_KEY")),
 		path:      statePath(),
 		following: map[string]bool{},
-		threads:   map[string]string{},
 	}
 	b.load()
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
@@ -105,7 +104,7 @@ func (b *bridge) onReady(s *discordgo.Session, r *discordgo.Ready) {
 		var chans []*discordgo.Channel
 		if threads, err := s.GuildThreadsActive(g.ID); err == nil {
 			for _, t := range threads.Threads {
-				if id := sessionOf(t.Name); id != "" {
+				if id := b.sessionFor(t); id != "" {
 					if n, ok := b.relayedFrom(id); ok {
 						b.follow(t.ID, id, n)
 					}
@@ -300,16 +299,21 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 	if err != nil {
 		return err
 	}
-	_, title, _ := strings.Cut(th.Name, " ")
-	if _, err := b.dc.ChannelEdit(th.ID, &discordgo.ChannelEdit{Name: strings.TrimSpace(id + " " + title)}); err != nil {
-		return fmt.Errorf("session %s was made, but renaming the thread failed: %w", id, err)
-	}
 	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
 	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
 	if text != "" {
 		msg += "\n" + text
 	}
 	b.post(th.ID, id, msgID, msg)
+	// The state file, not the name, says which session the thread shows, so
+	// the rename can wait out Discord's limit of about two per ten minutes
+	// without holding up other messages.
+	_, title, _ := strings.Cut(th.Name, " ")
+	go func() {
+		if _, err := b.dc.ChannelEdit(th.ID, &discordgo.ChannelEdit{Name: strings.TrimSpace(id + " " + title)}); err != nil {
+			log.Printf("rename thread %s: %v", th.ID, err)
+		}
+	}()
 	return nil
 }
 
@@ -427,7 +431,10 @@ func (b *bridge) post(thread, id, msgID, text string) {
 // says, until the thread shows another session.
 func (b *bridge) follow(thread, id string, n int) {
 	b.mu.Lock()
-	b.threads[thread] = id
+	if b.st.Threads[thread] != id {
+		b.st.Threads[thread] = id
+		b.save()
+	}
 	running := b.following[id]
 	b.following[id] = true
 	b.mu.Unlock()
@@ -464,14 +471,14 @@ func (b *bridge) follow(thread, id string, n int) {
 func (b *bridge) shows(thread, id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.threads[thread] == id
+	return b.st.Threads[thread] == id
 }
 
-// sessionFor is the session a thread shows: the one it was moved to, else
-// the one its name starts with.
+// sessionFor is the session a thread shows: the one it was last moved to,
+// else the one its name starts with.
 func (b *bridge) sessionFor(th *discordgo.Channel) string {
 	b.mu.Lock()
-	id, ok := b.threads[th.ID]
+	id, ok := b.st.Threads[th.ID]
 	b.mu.Unlock()
 	if ok {
 		return id
@@ -544,6 +551,9 @@ func (b *bridge) load() {
 	}
 	if b.st.Relayed == nil {
 		b.st.Relayed = map[string]int{}
+	}
+	if b.st.Threads == nil {
+		b.st.Threads = map[string]string{}
 	}
 }
 
