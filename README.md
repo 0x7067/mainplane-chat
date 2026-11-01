@@ -18,5 +18,6 @@ Runs on the harness machine. Environment:
 | `DISCORD_TOKEN` | bot token; the bot needs the Message Content intent |
 | `MAINPLANE_KEY` | harness api key (`mainplane-server key new discord`) |
 | `MAINPLANE_URL` | default `http://127.0.0.1:8080` |
+| `MAINPLANE_DISCORD_TESTER` | optional: the user id of a tester bot whose messages the bot handles as a person's, for end-to-end tests (`.agents/skills/verify-mainplane-discord`). Other bots stay ignored |
 
     go build -o ~/go/bin/mainplane-discord .

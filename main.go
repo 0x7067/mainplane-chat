@@ -45,6 +45,7 @@ type bridge struct {
 	harness string // base URL of the harness API
 	key     string
 	path    string // the state file
+	tester  string // a bot user id whose messages count as a person's, for end-to-end tests
 
 	mu        sync.Mutex
 	following map[string]bool // session ids with a follower running
@@ -72,6 +73,7 @@ func main() {
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
 		path:      statePath(),
+		tester:    os.Getenv("MAINPLANE_DISCORD_TESTER"),
 		following: map[string]bool{},
 	}
 	b.load()
@@ -157,7 +159,7 @@ func (b *bridge) replay(c *discordgo.Channel) {
 func (b *bridge) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) { b.handle(m.Message) }
 
 func (b *bridge) handle(m *discordgo.Message) {
-	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot {
+	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != b.tester {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
