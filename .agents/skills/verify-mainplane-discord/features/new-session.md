@@ -8,6 +8,7 @@ A message in a channel starts a Mainplane session on the model the terminal app 
 - `new-model` the model is the newest session's, else the catalog's default, if its provider is connected.
 - `new-workers` the session has every connected worker.
 - `new-reply` the agent's reply comes back in the thread; a thread message continues the session.
+- `new-label` when the session gets a name (its agent labels it at the start, per the Mainplane AGENTS.md), the thread is renamed `<id> <label>`.
 
 ## How to get to it (user POV)
 
@@ -25,7 +26,11 @@ Preconditions:
 - **Reply.** Run `scripts/thread.sh <thread id>`. The bot posted the agent's `ok`.
 - **Continue.** In the thread, send `reply with the word again`. `scripts/thread.sh <thread id>` shows `again` from the bot, and `mainplane tail <session id>` shows both messages `via=discord`.
 
+- **Label.** With a task the agent has to work on (not a one-word reply), within a minute `mainplane info <session id> | jq .name` is a 3-6 word label and `scripts/discord.sh /channels/<thread id> | jq -r .name` is `<session id> <label>`.
+
 ## Gotchas
+
+- Labels come from the agent: a small model on low effort may skip the rule. Opus follows it.
 
 - The thread is made on the user's message; its id is the message's `thread.id`, not the message id.
 - The first reply can take tens of seconds on a cold provider; wait on `thread.sh`, not on the screen.
