@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
+	"github.com/mainplane-ai/mainplane/pkg/statefile"
 )
 
 func TestNewer(t *testing.T) {
@@ -43,6 +44,40 @@ func TestContinued(t *testing.T) {
 	} {
 		if got := continued(msg); got != want {
 			t.Errorf("continued(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
+func TestContextFull(t *testing.T) {
+	for body, want := range map[string]bool{
+		"context 250009 exceeds limit 250000":                      true,
+		"context 8300 exceeds limit 8200":                          true,
+		"The session was stopped during the last step by discord.": false,
+		"anthropic: 529 overloaded":                                false,
+	} {
+		if got := contextFull(body); got != want {
+			t.Errorf("contextFull(%q) = %v", body, got)
+		}
+	}
+}
+
+func TestLastUnanswered(t *testing.T) {
+	rec := func(kind statefile.Kind, via, body string) statefile.Record {
+		return statefile.Record{Header: statefile.Header{Kind: kind, Type: "text/plain", Via: via}, Body: []byte(body)}
+	}
+	for name, c := range map[string]struct {
+		recs []statefile.Record
+		want string
+	}{
+		"answered":          {[]statefile.Record{rec(statefile.Message, "discord", "hi"), rec(statefile.Text, "", "hello")}, ""},
+		"unanswered":        {[]statefile.Record{rec(statefile.Text, "", "hello"), rec(statefile.Message, "discord", "now do X")}, "now do X"},
+		"newest wins":       {[]statefile.Record{rec(statefile.Message, "discord", "a"), rec(statefile.Message, "cli", "b")}, "b"},
+		"skip retry":        {[]statefile.Record{rec(statefile.Message, "discord", "do X"), rec(statefile.Message, "retry", "Continue")}, "do X"},
+		"skip job":          {[]statefile.Record{rec(statefile.Message, "job", "job done")}, ""},
+		"skip continuation": {[]statefile.Record{rec(statefile.Message, "discord", continuePrefix+"abcd1234. Retrieve…")}, ""},
+	} {
+		if got := lastUnanswered(c.recs); got != c.want {
+			t.Errorf("%s: lastUnanswered = %q, want %q", name, got, c.want)
 		}
 	}
 }

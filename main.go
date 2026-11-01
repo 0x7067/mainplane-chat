@@ -207,14 +207,14 @@ func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
 	case "info":
 		err = b.sayInfo(th.ID, id)
 	case "continue":
-		err = b.continueIn(th, id, msgID, "", rest)
+		_, err = b.continueIn(th, id, msgID, "", rest)
 	case "model":
 		if rest == "" {
 			err = b.listModels(th.ID, id)
 			break
 		}
 		model := strings.Fields(rest)[0]
-		err = b.continueIn(th, id, msgID, model, strings.TrimSpace(strings.TrimPrefix(rest, model)))
+		_, err = b.continueIn(th, id, msgID, model, strings.TrimSpace(strings.TrimPrefix(rest, model)))
 	default:
 		return false
 	}
@@ -280,27 +280,27 @@ func (b *bridge) newConf() (statefile.Conf, error) {
 // continueIn is /continue, and /model with a model: a new session with this
 // one's config, or the model's and this one's workers, told to carry on from
 // this one, as the terminal app does. The thread then shows the new session.
-func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) error {
+func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) (string, error) {
 	cur, err := b.info(old)
 	if err != nil {
-		return err
+		return "", err
 	}
 	conf := cur.Config
 	if model != "" {
 		cat, ids, err := b.models()
 		if err != nil {
-			return err
+			return "", err
 		}
 		id := pickModel(cat, ids, model)
 		if id == "" {
-			return fmt.Errorf("no connected model %q: /model lists them", model)
+			return "", fmt.Errorf("no connected model %q: /model lists them", model)
 		}
 		conf = presetConf(id, cat.Presets[id])
 		conf.Workers = cur.Config.Workers
 	}
 	id, err := b.create(conf)
 	if err != nil {
-		return err
+		return "", err
 	}
 	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
 	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
@@ -308,7 +308,53 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 		msg += "\n" + text
 	}
 	b.post(th.ID, id, msgID, msg)
-	return nil
+	return id, nil
+}
+
+// contextFull is whether an error record is the harness ending a session at
+// its context limit: "context 250009 exceeds limit 250000".
+func contextFull(body string) bool {
+	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
+}
+
+// continueFull is /continue, run by the bot when the thread's session ends
+// at its context limit (error record n), as Mainplane intends a full session
+// to go on. The new session gets the last message the full one did not
+// answer, so it answers what was just asked.
+func (b *bridge) continueFull(thread, id string, n int) {
+	th, err := b.dc.State.Channel(thread)
+	if err != nil {
+		if th, err = b.dc.Channel(thread); err != nil {
+			log.Printf("continue %s: %v", id, err)
+			return
+		}
+	}
+	text := "The session before ran out of context. Carry on where it stopped."
+	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
+		if m := lastUnanswered(recs); m != "" {
+			text += "\nThe last message, which it did not answer:\n" + m
+		}
+	}
+	if _, err := b.continueIn(th, id, "context-full-"+id, "", text); err != nil {
+		b.say(thread, "automatic /continue failed: "+err.Error())
+	}
+}
+
+// lastUnanswered is the newest text message, from a person or a connector,
+// with no agent reply after it, or "". A retry, a job's report and a
+// continuation's own first message do not count.
+func lastUnanswered(recs []statefile.Record) string {
+	last := ""
+	for _, r := range recs {
+		switch {
+		case r.Kind == statefile.Text:
+			last = ""
+		case r.Kind == statefile.Message && strings.HasPrefix(r.Type, "text/plain") &&
+			r.Via != "retry" && r.Via != "job" && !strings.HasPrefix(string(r.Body), continuePrefix):
+			last = string(r.Body)
+		}
+	}
+	return last
 }
 
 // continuePrefix starts the first message of a session that continues
@@ -542,6 +588,12 @@ func (b *bridge) follow(thread, id string, n int) {
 				case statefile.Text:
 					b.say(thread, string(r.Body))
 				case statefile.Error:
+					if contextFull(string(r.Body)) && b.shows(thread, id) {
+						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
+						b.relayed(id, r.N)
+						b.continueFull(thread, id, r.N)
+						continue
+					}
 					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
 				case statefile.Call:
 					_ = b.dc.ChannelTyping(thread)
