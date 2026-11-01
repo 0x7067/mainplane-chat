@@ -692,7 +692,8 @@ func (b *bridge) follow(thread, id string, n int) {
 						t.key = r.IdempotencyKey
 						t.asked = append(t.asked, r.IdempotencyKey)
 					}
-					if r.Via != via && strings.HasPrefix(r.Type, "text/plain") {
+					// The harness's own "Continue" from a retry is not a person's.
+					if r.Via != via && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain") {
 						b.say(thread, quote(r.Via, string(r.Body)))
 					}
 				case statefile.Name:
@@ -716,6 +717,10 @@ func (b *bridge) follow(thread, id string, n int) {
 						b.relayed(id, r.N)
 						b.continueFull(thread, id, r.N)
 						continue
+					}
+					if r.Via != "" { // a stop: on purpose, so no Retry to offer
+						b.say(thread, "⚠️ "+string(r.Body))
+						break
 					}
 					retry := discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 						discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: "retry:" + id},
