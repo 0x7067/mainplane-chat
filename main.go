@@ -1,6 +1,9 @@
-// mainplane-discord drives Mainplane agents from a private Discord server. A
-// message in any channel starts a session in a new thread named after it;
-// messages in that thread continue it, and the agent's replies come back there.
+// mainplane-discord drives Mainplane agents from a private Discord server, the
+// way the mainplane terminal app does. A message in any channel starts a
+// session in a new thread named after it; messages in that thread continue it,
+// and the agent's replies come back there. A thread takes the terminal app's
+// /model, /continue and /stop, and the CLI's /retry and /info. What happens
+// while the bot is down is picked up when it comes back.
 package main
 
 import (
@@ -8,43 +11,79 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"slices"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/bwmarrin/discordgo"
+	"github.com/mainplane-ai/mainplane/pkg/catalog"
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
 )
 
 const via = "discord"
 
+// The catalog groups the terminal app reads: the models it offers, and the
+// ones a new session takes when the newest session's is not connected.
+const (
+	group    = "self-hosted-all"
+	defaults = "self-hosted-default"
+)
+
 type bridge struct {
 	dc      *discordgo.Session
 	harness string // base URL of the harness API
 	key     string
+	path    string // the state file
 
 	mu        sync.Mutex
-	following map[string]bool // session ids with a follower running
+	following map[string]bool   // session ids with a follower running
+	threads   map[string]string // thread id -> the session it shows
+	st        state
+}
+
+// state is kept across restarts, so the bot picks up what happened while it
+// was down.
+type state struct {
+	Seen    map[string]string `json:"seen"`    // channel or thread id -> newest Discord message handled
+	Relayed map[string]int    `json:"relayed"` // session id -> newest record relayed
+}
+
+type info struct {
+	ID          string         `json:"id"`
+	Status      string         `json:"status"`
+	Config      statefile.Conf `json:"config"`
+	N           int            `json:"n"`
+	ContextUsed int            `json:"context_used"`
 }
 
 func main() {
 	b := &bridge{
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
+		path:      statePath(),
 		following: map[string]bool{},
+		threads:   map[string]string{},
 	}
+	b.load()
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
 	if err != nil {
 		log.Fatal(err)
 	}
 	dc.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
+	// Events are handled one at a time, in order, and catching up on Ready
+	// finishes before the next message is handled.
+	dc.SyncEvents = true
 	dc.AddHandler(b.onMessage)
 	dc.AddHandler(b.onReady)
 	b.dc = dc
@@ -58,107 +97,316 @@ func main() {
 	<-stop
 }
 
-// onReady resumes following the sessions of the active threads.
+// onReady follows the sessions of the active threads from the last record
+// relayed, then handles the messages sent while the bot was down. A channel
+// the bot has not seen before starts from now.
 func (b *bridge) onReady(s *discordgo.Session, r *discordgo.Ready) {
 	for _, g := range r.Guilds {
-		threads, err := s.GuildThreadsActive(g.ID)
-		if err != nil {
-			continue
+		var chans []*discordgo.Channel
+		if threads, err := s.GuildThreadsActive(g.ID); err == nil {
+			for _, t := range threads.Threads {
+				if id := sessionOf(t.Name); id != "" {
+					if n, ok := b.relayedFrom(id); ok {
+						b.follow(t.ID, id, n)
+					}
+				}
+				chans = append(chans, t)
+			}
 		}
-		for _, t := range threads.Threads {
-			if id := sessionOf(t.Name); id != "" {
-				if info, err := b.info(id); err == nil {
-					b.follow(t.ID, id, info.N)
+		if cs, err := s.GuildChannels(g.ID); err == nil {
+			for _, c := range cs {
+				if c.Type == discordgo.ChannelTypeGuildText {
+					chans = append(chans, c)
 				}
 			}
+		}
+		for _, c := range chans {
+			b.replay(c)
+		}
+	}
+	log.Print("caught up")
+}
+
+// replay handles the messages in c after the newest one handled there.
+func (b *bridge) replay(c *discordgo.Channel) {
+	b.mu.Lock()
+	after, ok := b.st.Seen[c.ID]
+	b.mu.Unlock()
+	if !ok {
+		if c.LastMessageID != "" {
+			b.fresh(c.ID, c.LastMessageID)
+		}
+		return
+	}
+	for {
+		msgs, err := b.dc.ChannelMessages(c.ID, 100, "", after, "")
+		if err != nil || len(msgs) == 0 {
+			return
+		}
+		sort.Slice(msgs, func(i, j int) bool { return newer(msgs[j].ID, msgs[i].ID) })
+		for _, m := range msgs {
+			b.handle(m)
+		}
+		after = msgs[len(msgs)-1].ID
+		if len(msgs) < 100 {
+			return
 		}
 	}
 }
 
-func (b *bridge) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) {
-	if m.Author == nil || m.Author.Bot {
+func (b *bridge) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) { b.handle(m.Message) }
+
+func (b *bridge) handle(m *discordgo.Message) {
+	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
 	if text == "" {
 		return
 	}
-	ch, err := s.State.Channel(m.ChannelID)
+	ch, err := b.dc.State.Channel(m.ChannelID)
 	if err != nil {
-		if ch, err = s.Channel(m.ChannelID); err != nil {
+		if ch, err = b.dc.Channel(m.ChannelID); err != nil {
 			return
 		}
 	}
 	if !ch.IsThread() {
-		b.start(m.Message, text)
+		b.start(m, text)
 		return
 	}
-	id := sessionOf(ch.Name)
+	id := b.sessionFor(ch)
 	if id == "" {
 		return
 	}
-	if text == "!stop" {
-		if err := b.call("POST", "/sessions/"+id+"/stop?via="+via, "", nil, nil); err != nil {
-			b.say(ch.ID, "stop failed: "+err.Error())
-		}
+	if b.command(ch, id, m.ID, text) {
 		return
 	}
 	b.post(ch.ID, id, m.ID, text)
 }
 
-// start makes a session like the newest one, on every connected worker, and a
-// thread for it named "<session id> <first words>".
+// command runs a thread command and reports whether text was one. /model and
+// /continue take a message for the session they make.
+func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
+	word := strings.Fields(text)[0]
+	if len(word) < 2 || word[0] != '/' && word[0] != '!' {
+		return false
+	}
+	rest := strings.TrimSpace(strings.TrimPrefix(text, word))
+	var err error
+	switch word[1:] {
+	case "stop":
+		err = b.call("POST", "/sessions/"+id+"/stop?via="+via, "", nil, nil)
+	case "retry":
+		if err = b.call("POST", "/sessions/"+id+"/retry?via="+via, "", nil, nil); err == nil {
+			if n, ok := b.relayedFrom(id); ok {
+				b.follow(th.ID, id, n)
+			}
+		}
+	case "info":
+		err = b.sayInfo(th.ID, id)
+	case "continue":
+		err = b.continueIn(th, id, msgID, "", rest)
+	case "model":
+		if rest == "" {
+			err = b.listModels(th.ID, id)
+			break
+		}
+		model := strings.Fields(rest)[0]
+		err = b.continueIn(th, id, msgID, model, strings.TrimSpace(strings.TrimPrefix(rest, model)))
+	default:
+		return false
+	}
+	if err != nil {
+		b.say(th.ID, word+" failed: "+err.Error())
+	}
+	return true
+}
+
+// start makes a session with the config newConf picks and a thread for it
+// named "<session id> <first words>".
 func (b *bridge) start(m *discordgo.Message, text string) {
 	conf, err := b.newConf()
 	if err != nil {
-		b.reply(m, "could not start a session: "+err.Error())
+		b.say(m.ChannelID, "could not start a session: "+err.Error())
 		return
 	}
-	var created struct{ ID string }
-	body, _ := json.Marshal(conf)
-	if err := b.call("POST", "/sessions?via="+via, "application/json", bytes.NewReader(body), &created); err != nil {
-		b.reply(m, "could not start a session: "+err.Error())
+	id, err := b.create(conf)
+	if err != nil {
+		b.say(m.ChannelID, "could not start a session: "+err.Error())
 		return
 	}
-	name := created.ID + " " + firstWords(text, 80)
+	name := id + " " + firstWords(text, 80)
 	th, err := b.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: name, AutoArchiveDuration: 10080})
 	if err != nil {
-		b.reply(m, "session "+created.ID+" started, but the thread failed: "+err.Error())
+		b.say(m.ChannelID, "session "+id+" started, but the thread failed: "+err.Error())
 		return
 	}
-	b.post(th.ID, created.ID, m.ID, text)
+	b.post(th.ID, id, m.ID, text)
 }
 
-// newConf copies the newest session's model and settings and gives the new
-// session every connected worker.
-func (b *bridge) newConf() (map[string]any, error) {
-	var infos []struct {
-		Config statefile.Conf `json:"config"`
+// newConf is the config of a new session, picked as the terminal app picks
+// it: the model of the newest session, else the catalog's default, each only
+// when its provider is connected. Its workers are every connected worker.
+func (b *bridge) newConf() (statefile.Conf, error) {
+	cat, ids, err := b.models()
+	if err != nil {
+		return statefile.Conf{}, err
 	}
-	if err := b.call("GET", "/sessions?limit=1", "", nil, &infos); err != nil {
-		return nil, err
+	if len(ids) == 0 {
+		return statefile.Conf{}, errors.New("no provider of the catalog is connected")
 	}
-	conf := map[string]any{"model": "claude-code/claude-opus-5-5", "tools": "default", "context_limit": 250000,
-		"params": map[string]any{"effort": "medium"}, "input": []string{"image/jpeg", "image/png", "image/gif", "image/webp"}}
-	if len(infos) > 0 {
-		c := infos[0].Config
-		conf = map[string]any{"model": c.Model, "tools": c.Tools, "context_limit": c.ContextLimit, "params": c.Params, "input": c.Input, "preset": c.Preset}
+	want := cat.Groups[defaults]
+	var newest []info
+	if err := b.call("GET", "/sessions?limit=1", "", nil, &newest); err != nil {
+		return statefile.Conf{}, err
 	}
-	var workers []struct {
-		Name    string `json:"name"`
-		Refused string `json:"refused"`
+	if len(newest) > 0 {
+		want = append([]string{newest[0].Config.Preset, newest[0].Config.Model}, want...)
 	}
-	if err := b.call("GET", "/workers", "", nil, &workers); err != nil {
-		return nil, err
-	}
-	var all []map[string]string
-	for _, w := range workers {
-		if w.Refused == "" {
-			all = append(all, map[string]string{"name": w.Name})
+	pick := ids[0]
+	for _, id := range want {
+		if slices.Contains(ids, id) {
+			pick = id
+			break
 		}
 	}
-	conf["workers"] = all
-	return conf, nil
+	conf := presetConf(pick, cat.Presets[pick])
+	conf.Workers, err = b.workers()
+	return conf, err
+}
+
+// continueIn is /continue, and /model with a model: a new session with this
+// one's config, or the model's and this one's workers, told to carry on from
+// this one, as the terminal app does. The thread then shows the new session.
+func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) error {
+	cur, err := b.info(old)
+	if err != nil {
+		return err
+	}
+	conf := cur.Config
+	if model != "" {
+		cat, ids, err := b.models()
+		if err != nil {
+			return err
+		}
+		id := pickModel(cat, ids, model)
+		if id == "" {
+			return fmt.Errorf("no connected model %q: /model lists them", model)
+		}
+		conf = presetConf(id, cat.Presets[id])
+		conf.Workers = cur.Config.Workers
+	}
+	id, err := b.create(conf)
+	if err != nil {
+		return err
+	}
+	_, title, _ := strings.Cut(th.Name, " ")
+	if _, err := b.dc.ChannelEdit(th.ID, &discordgo.ChannelEdit{Name: strings.TrimSpace(id + " " + title)}); err != nil {
+		return fmt.Errorf("session %s was made, but renaming the thread failed: %w", id, err)
+	}
+	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
+	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
+	if text != "" {
+		msg += "\n" + text
+	}
+	b.post(th.ID, id, msgID, msg)
+	return nil
+}
+
+// listModels is /model alone: the connected models, this session's marked.
+func (b *bridge) listModels(thread, id string) error {
+	cat, ids, err := b.models()
+	if err != nil {
+		return err
+	}
+	cur, _ := b.info(id)
+	var sb strings.Builder
+	sb.WriteString("`/model <id> [message]` continues in a new session on that model:\n")
+	for _, m := range ids {
+		sb.WriteString("`" + m + "` " + cat.Presets[m].Name)
+		if m == cur.Config.Preset {
+			sb.WriteString(" (current)")
+		}
+		sb.WriteString("\n")
+	}
+	b.say(thread, sb.String())
+	return nil
+}
+
+func (b *bridge) sayInfo(thread, id string) error {
+	i, err := b.info(id)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, w := range i.Config.Workers {
+		names = append(names, w.Name)
+	}
+	b.say(thread, fmt.Sprintf("session `%s` %s\nmodel `%s`\nworkers %s\ncontext %d/%d",
+		i.ID, i.Status, i.Config.Model, strings.Join(names, ", "), i.ContextUsed, i.Config.ContextLimit))
+	return nil
+}
+
+// models is the catalog and the ids of its presets whose provider the harness
+// serves, in the catalog's order: the models the terminal app offers.
+func (b *bridge) models() (catalog.Catalog, []string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	cat, err := catalog.Fetch(ctx)
+	if err != nil {
+		return cat, nil, err
+	}
+	var ps []struct{ Name string }
+	if err := b.call("GET", "/providers", "", nil, &ps); err != nil {
+		return cat, nil, err
+	}
+	var ids []string
+	for _, id := range cat.Groups[group] {
+		if slices.ContainsFunc(ps, func(p struct{ Name string }) bool { return p.Name == cat.Presets[id].Provider }) {
+			ids = append(ids, id)
+		}
+	}
+	return cat, ids, nil
+}
+
+// pickModel is the id among ids that s names: the id, the model or its name.
+func pickModel(cat catalog.Catalog, ids []string, s string) string {
+	for _, id := range ids {
+		p := cat.Presets[id]
+		if strings.EqualFold(s, id) || strings.EqualFold(s, p.Model) || strings.EqualFold(s, p.Name) {
+			return id
+		}
+	}
+	return ""
+}
+
+func presetConf(id string, p catalog.Preset) statefile.Conf {
+	return statefile.Conf{Model: p.Provider + "/" + p.Model, Tools: p.Tools, ContextLimit: p.ContextLimit, Input: p.Input, Params: p.Params, Preset: id}
+}
+
+// workers is every connected worker.
+func (b *bridge) workers() ([]statefile.Worker, error) {
+	var ws []struct{ Name, Refused string }
+	if err := b.call("GET", "/workers", "", nil, &ws); err != nil {
+		return nil, err
+	}
+	var all []statefile.Worker
+	for _, w := range ws {
+		if w.Refused == "" {
+			all = append(all, statefile.Worker{Name: w.Name})
+		}
+	}
+	return all, nil
+}
+
+func (b *bridge) create(conf statefile.Conf) (string, error) {
+	body, err := json.Marshal(conf)
+	if err != nil {
+		return "", err
+	}
+	var out struct{ ID string }
+	err = b.call("POST", "/sessions?via="+via, "application/json", bytes.NewReader(body), &out)
+	return out.ID, err
 }
 
 // post sends text to the session, keyed by the Discord message so a repeat
@@ -175,18 +423,21 @@ func (b *bridge) post(thread, id, msgID, text string) {
 	b.follow(thread, id, out.N)
 }
 
-// follow long-polls the session after record n and relays what the agent says.
+// follow long-polls the session after record n and relays what the agent
+// says, until the thread shows another session.
 func (b *bridge) follow(thread, id string, n int) {
 	b.mu.Lock()
-	if b.following[id] {
-		b.mu.Unlock()
-		return
-	}
+	b.threads[thread] = id
+	running := b.following[id]
 	b.following[id] = true
 	b.mu.Unlock()
+	if running {
+		return
+	}
+	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
-		for {
+		for b.shows(thread, id) {
 			recs, err := b.records(id, n)
 			if err != nil {
 				log.Printf("session %s: %v", id, err)
@@ -199,14 +450,118 @@ func (b *bridge) follow(thread, id string, n int) {
 				case statefile.Text:
 					b.say(thread, string(r.Body))
 				case statefile.Error:
-					b.say(thread, "⚠️ "+string(r.Body))
+					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
 				case statefile.Call:
 					_ = b.dc.ChannelTyping(thread)
 					b.say(thread, "-# "+callLine(r.Body))
 				}
+				b.relayed(id, n)
 			}
 		}
 	}()
+}
+
+func (b *bridge) shows(thread, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.threads[thread] == id
+}
+
+// sessionFor is the session a thread shows: the one it was moved to, else
+// the one its name starts with.
+func (b *bridge) sessionFor(th *discordgo.Channel) string {
+	b.mu.Lock()
+	id, ok := b.threads[th.ID]
+	b.mu.Unlock()
+	if ok {
+		return id
+	}
+	return sessionOf(th.Name)
+}
+
+// relayedFrom is the record to follow a session after: the last relayed,
+// else its newest.
+func (b *bridge) relayedFrom(id string) (int, bool) {
+	b.mu.Lock()
+	n, ok := b.st.Relayed[id]
+	b.mu.Unlock()
+	if ok {
+		return n, true
+	}
+	i, err := b.info(id)
+	return i.N, err == nil
+}
+
+func (b *bridge) relayed(id string, n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if n > b.st.Relayed[id] {
+		b.st.Relayed[id] = n
+		b.save()
+	}
+}
+
+// fresh reports whether message id is newer than every one handled in
+// channel ch, and marks it handled.
+func (b *bridge) fresh(ch, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if !newer(id, b.st.Seen[ch]) {
+		return false
+	}
+	b.st.Seen[ch] = id
+	b.save()
+	return true
+}
+
+// newer compares Discord ids, which grow with time.
+func newer(a, b string) bool {
+	if len(a) != len(b) {
+		return len(a) > len(b)
+	}
+	return a > b
+}
+
+func statePath() string {
+	dir := os.Getenv("XDG_STATE_HOME")
+	if dir == "" {
+		home, _ := os.UserHomeDir()
+		dir = filepath.Join(home, ".local", "state")
+	}
+	return filepath.Join(dir, "mainplane-discord", "state.json")
+}
+
+func (b *bridge) load() {
+	data, err := os.ReadFile(b.path)
+	if err == nil {
+		err = json.Unmarshal(data, &b.st)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		log.Printf("state: %v", err)
+	}
+	if b.st.Seen == nil {
+		b.st.Seen = map[string]string{}
+	}
+	if b.st.Relayed == nil {
+		b.st.Relayed = map[string]int{}
+	}
+}
+
+// save writes the state; b.mu is held.
+func (b *bridge) save() {
+	data, err := json.Marshal(b.st)
+	if err == nil {
+		err = os.MkdirAll(filepath.Dir(b.path), 0o700)
+	}
+	if err == nil {
+		err = os.WriteFile(b.path+".tmp", data, 0o600)
+	}
+	if err == nil {
+		err = os.Rename(b.path+".tmp", b.path)
+	}
+	if err != nil {
+		log.Printf("state: %v", err)
+	}
 }
 
 func (b *bridge) records(id string, after int) ([]statefile.Record, error) {
@@ -234,8 +589,8 @@ func (b *bridge) records(id string, after int) ([]statefile.Record, error) {
 	}
 }
 
-func (b *bridge) info(id string) (struct{ N int }, error) {
-	var i struct{ N int }
+func (b *bridge) info(id string) (info, error) {
+	var i info
 	return i, b.call("GET", "/sessions/"+id, "", nil, &i)
 }
 
@@ -280,8 +635,6 @@ func (b *bridge) say(channel, text string) {
 		}
 	}
 }
-
-func (b *bridge) reply(m *discordgo.Message, text string) { b.say(m.ChannelID, text) }
 
 // sessionOf is the session id a thread name starts with, or "".
 func sessionOf(name string) string {

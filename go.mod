@@ -4,7 +4,7 @@ go 1.27.0
 
 require (
 	github.com/bwmarrin/discordgo v0.29.0
-	github.com/mainplane-ai/mainplane v0.5.9
+	github.com/mainplane-ai/mainplane v0.5.10
 )
 
 require (
