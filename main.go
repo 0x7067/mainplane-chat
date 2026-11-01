@@ -16,7 +16,10 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"mime"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -174,7 +177,7 @@ func (b *bridge) handle(m *discordgo.Message) {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
-	if text == "" {
+	if text == "" && len(m.Attachments) == 0 {
 		return
 	}
 	ch, err := b.dc.State.Channel(m.ChannelID)
@@ -194,13 +197,17 @@ func (b *bridge) handle(m *discordgo.Message) {
 	if b.command(ch, id, m.ID, text) {
 		return
 	}
-	b.post(ch.ID, id, m.ID, text)
+	b.post(ch.ID, id, m.ID, text, m.Attachments)
 }
 
 // command runs a thread command and reports whether text was one. /model and
 // /continue take a message for the session they make.
 func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
-	word := strings.Fields(text)[0]
+	fields := strings.Fields(text)
+	if len(fields) == 0 {
+		return false
+	}
+	word := fields[0]
 	if len(word) < 2 || word[0] != '/' && word[0] != '!' {
 		return false
 	}
@@ -248,13 +255,13 @@ func (b *bridge) start(m *discordgo.Message, text string) {
 		b.say(m.ChannelID, "could not start a session: "+err.Error())
 		return
 	}
-	name := id + " " + firstWords(text, 80)
+	name := id + " " + firstWords(cmp.Or(text, m.Attachments[0].Filename), 80)
 	th, err := b.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: name, AutoArchiveDuration: 10080})
 	if err != nil {
 		b.say(m.ChannelID, "session "+id+" started, but the thread failed: "+err.Error())
 		return
 	}
-	b.post(th.ID, id, m.ID, text)
+	b.post(th.ID, id, m.ID, text, m.Attachments)
 }
 
 // newConf is the config of a new session, picked as the terminal app picks
@@ -318,7 +325,7 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 	if text != "" {
 		msg += "\n" + text
 	}
-	b.post(th.ID, id, msgID, msg)
+	b.post(th.ID, id, msgID, msg, nil)
 	return id, nil
 }
 
@@ -615,11 +622,32 @@ func (b *bridge) create(conf statefile.Conf) (string, error) {
 	return out.ID, err
 }
 
-// post sends text to the session, keyed by the Discord message so a repeat
-// appends nothing, and makes sure the thread follows the session.
-func (b *bridge) post(thread, id, msgID, text string) {
-	req, _ := http.NewRequest("POST", b.harness+"/sessions/"+id+"/records?via="+via, strings.NewReader(text))
-	req.Header.Set("Content-Type", "text/plain")
+// post sends a Discord message's text and files to the session, keyed by the
+// message so a repeat appends nothing, and makes sure the thread follows the
+// session. Each part is a record: the text, then each image.
+func (b *bridge) post(thread, id, msgID, text string, files []*discordgo.MessageAttachment) {
+	parts, skipped := b.parts(id, text, files)
+	if len(skipped) > 0 {
+		b.say(thread, "-# not sent: "+strings.Join(skipped, ", "))
+	}
+	if len(parts) == 0 {
+		return
+	}
+	var body bytes.Buffer
+	ctype := "text/plain"
+	if len(parts) == 1 && parts[0].ctype == ctype {
+		body.Write(parts[0].body)
+	} else {
+		mw := multipart.NewWriter(&body)
+		for _, p := range parts {
+			w, _ := mw.CreatePart(textproto.MIMEHeader{"Content-Type": {p.ctype}})
+			w.Write(p.body)
+		}
+		mw.Close()
+		ctype = mw.FormDataContentType()
+	}
+	req, _ := http.NewRequest("POST", b.harness+"/sessions/"+id+"/records?via="+via, &body)
+	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Idempotency-Key", msgID)
 	var out struct{ N int }
 	if err := b.do(req, &out); err != nil {
@@ -627,7 +655,62 @@ func (b *bridge) post(thread, id, msgID, text string) {
 		return
 	}
 	b.mark(thread, msgID, seen)
-	b.follow(thread, id, out.N-1) // from the message itself, the reply's target
+	b.follow(thread, id, out.N-len(parts)) // from the message itself, the reply's target
+}
+
+type part struct {
+	ctype string
+	body  []byte
+}
+
+// parts is what a message sends: its text, with text files inlined, then the
+// images the session's model takes. The rest are skipped, by file name.
+func (b *bridge) parts(id, text string, files []*discordgo.MessageAttachment) ([]part, []string) {
+	var input []string
+	if len(files) > 0 {
+		if i, err := b.info(id); err == nil {
+			input = i.Config.Input
+		}
+	}
+	var images []part
+	var skipped []string
+	for _, f := range files {
+		ctype, _, _ := mime.ParseMediaType(f.ContentType)
+		image := slices.Contains(input, ctype) && f.Size <= 5<<20
+		textual := (strings.HasPrefix(ctype, "text/") || ctype == "application/json") && f.Size <= 200<<10
+		var data []byte
+		var err error
+		if image || textual {
+			data, err = download(f.URL)
+		}
+		switch {
+		case err != nil:
+			skipped = append(skipped, f.Filename+" ("+err.Error()+")")
+		case image:
+			images = append(images, part{ctype, data})
+		case textual:
+			text += "\n\n" + f.Filename + ":\n```\n" + strings.TrimRight(string(data), "\n") + "\n```"
+		default:
+			skipped = append(skipped, f.Filename)
+		}
+	}
+	var ps []part
+	if text = strings.TrimSpace(text); text != "" {
+		ps = append(ps, part{"text/plain", []byte(text)})
+	}
+	return append(ps, images...), skipped
+}
+
+func download(url string) ([]byte, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("%s", resp.Status)
+	}
+	return io.ReadAll(resp.Body)
 }
 
 // follow long-polls the session after record n and relays what the agent
@@ -688,7 +771,7 @@ func (b *bridge) follow(thread, id string, n int) {
 						b.finish(thread, id, &t, "")
 					}
 				case statefile.Message:
-					if r.Via == via && snowflake(r.IdempotencyKey) {
+					if r.Via == via && snowflake(r.IdempotencyKey) && r.IdempotencyKey != t.key {
 						t.key = r.IdempotencyKey
 						t.asked = append(t.asked, r.IdempotencyKey)
 					}
