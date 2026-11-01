@@ -8,7 +8,7 @@ Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a priva
   - `/model` lists the connected models; `/model <id> [message]` continues in a new session on that model, with the same workers. Use it when a provider's quota runs out.
   - `/continue [message]` continues in a new session with the same config.
   - `/retry` steps a failed session again; `/stop` stops the running step; `/info` shows status, model, workers and context.
-- What happens while the bot is down is picked up when it starts: agent replies it missed, and messages sent in channels and threads it has seen before. Its state is in `\$XDG_STATE_HOME/mainplane-discord/state.json` (`~/.local/state` by default).
+- What happens while the bot is down is picked up when it starts: agent replies it missed, and messages sent in channels and threads it has seen before. Its state is in `$XDG_STATE_HOME/mainplane-discord/state.json` (`~/.local/state` by default).
 
 Runs on the harness machine. Environment:
 
