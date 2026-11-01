@@ -502,7 +502,10 @@ func (b *bridge) post(thread, id, msgID, text string) {
 }
 
 // follow long-polls the session after record n and relays what the agent
-// says, until the thread shows another session.
+// says. Once the thread shows another session it goes on until this one has
+// been quiet for a poll, so a reply to a message sent before a quick /model
+// still arrives. It stops when the harness refuses the session, as for one
+// deleted.
 func (b *bridge) follow(thread, id string, n int) {
 	b.mu.Lock()
 	if b.st.Threads[thread] != id {
@@ -518,12 +521,20 @@ func (b *bridge) follow(thread, id string, n int) {
 	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
-		for b.shows(thread, id) {
+		for {
 			recs, err := b.records(id, n, "60s")
+			var refused *refusedError
+			if errors.As(err, &refused) {
+				log.Printf("session %s: %v; no longer following it", id, err)
+				return
+			}
 			if err != nil {
 				log.Printf("session %s: %v", id, err)
 				time.Sleep(5 * time.Second)
 				continue
+			}
+			if len(recs) == 0 && !b.shows(thread, id) {
+				return
 			}
 			for _, r := range recs {
 				n = r.N
@@ -662,6 +673,10 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
+		return nil, &refusedError{resp.Status + ": " + strings.TrimSpace(string(msg))}
+	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s", resp.Status)
 	}
@@ -678,6 +693,11 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 		recs = append(recs, r)
 	}
 }
+
+// refusedError is a 4xx from the harness, which a retry does not mend.
+type refusedError struct{ msg string }
+
+func (e *refusedError) Error() string { return e.msg }
 
 func (b *bridge) info(id string) (info, error) {
 	var i info
