@@ -13,14 +13,14 @@ When the bot starts, it relays agent replies it missed and handles messages type
 
 - Use Discord while the bot is stopped, or while the server restarts; it catches up when it is back.
 
-## Driving it with chrome-devtools-axi
+## Driving it with say.sh
 
 Preconditions:
 
 - A thread from thread-commands, moved to a new session at least once.
 
 - **Stop the bot.** On the server: `systemctl --user stop mainplane-discord`.
-- **Type while down.** In the thread, type `reply with the word late`. In `#bot-test`, type `verify catch-up <run id>: reply with the word fresh`.
+- **Send while down.** In the thread, send `reply with the word late`. In `#bot-test`, send `verify catch-up <run id>: reply with the word fresh`.
 - **Start the bot.** `systemctl --user start mainplane-discord`; `scripts/doctor.sh` passes.
 - **Proof.** `scripts/thread.sh <thread id>` shows `late` from the bot, and `mainplane tail <state file's session for the thread>` shows the message `via=discord`, so the moved mapping held. `scripts/thread.sh <bot-test id> 3` shows the `fresh` message with a new thread, which has `fresh`.
 

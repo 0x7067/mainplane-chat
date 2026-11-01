@@ -11,19 +11,19 @@ A message in a channel starts a Mainplane session on the model the terminal app 
 
 ## How to get to it (user POV)
 
-- Type a message in any text channel of the guild.
-- Type a message in a thread the bot made.
+- Send a message in any text channel of the guild.
+- Send a message in a thread the bot made.
 
-## Driving it with chrome-devtools-axi
+## Driving it with say.sh
 
 Preconditions:
 
 - Baseline preconditions hold.
 
-- **Start.** In `#bot-test`, type `verify new-session <run id>: reply with the word ok`. Run `fill @<textbox uid> "<text>"` and `press Enter`. Within seconds `scripts/thread.sh <bot-test id> 3` shows the message with `[thread <id>]`, and the thread's name starts with an 8-hex session id.
+- **Start.** In `#bot-test`, send `verify new-session <run id>: reply with the word ok`. Run `say.sh <bot-test id> "<text>"`. Within seconds `scripts/thread.sh <bot-test id> 3` shows the message with `[thread <id>]`, and the thread's name starts with an 8-hex session id.
 - **Config.** Run `mainplane info <session id>` on the server. Its model matches `mainplane sessions` newest before the run (or the catalog default), and its workers equal `mainplane workers` minus refused ones.
 - **Reply.** Run `scripts/thread.sh <thread id>`. The bot posted the agent's `ok`.
-- **Continue.** In the thread, type `reply with the word again`. `scripts/thread.sh <thread id>` shows `again` from the bot, and `mainplane tail <session id>` shows both messages `via=discord`.
+- **Continue.** In the thread, send `reply with the word again`. `scripts/thread.sh <thread id>` shows `again` from the bot, and `mainplane tail <session id>` shows both messages `via=discord`.
 
 ## Gotchas
 
