@@ -7,7 +7,7 @@ A thread follows a session that continues the one it shows, wherever it was made
 - `cont-detect` a continuation made outside Discord moves the thread within seconds.
 - `cont-relay` the new session's replies come back in the thread, from its start.
 - `cont-chain` a continuation of a continuation moves it again.
-- `cont-full` a thread's session that ends at its context limit is continued by the bot once; one it made that fills up before replying is not continued again.
+- `cont-full` a thread's session that ends at its context limit is continued by the bot, with the last unanswered message passed on; continuations chain.
 
 ## How to get to it (user POV)
 
@@ -25,7 +25,7 @@ reply with the word moved"`. Within about 5 seconds `scripts/thread.sh <thread i
 - **State.** `jq '.threads["<thread id>"]'` on the state file is `<new id>`.
 - **Discord goes on.** In the thread, send `reply with the word here`. `mainplane tail <new id>` shows it `via=discord`.
 
-- **Context full.** Continue the thread's session from the CLI as above, but with `"context_limit":8200` in the config and the message asking to read `main.go` whole (about 5k tokens). The step after the read fails with `context N exceeds limit 8200`; `thread.sh` shows the warning, `-# the context is full: continuing in a new session` and `-# continuing in session <id>`. That session has the same small limit, so it fills up too, and the bot says `not continuing again` instead of looping.
+- **Context full.** Continue the thread's session from the CLI as above, but with `"context_limit":8200` in the config and the message asking to read `main.go` whole (about 5k tokens) and reply in one line. That session overshoots in its last step, which the harness allows. In the thread, send `reply with just the word next`: `thread.sh` shows `⚠️ context N exceeds limit 8200`, `-# continuing in session <id>`, then `next` from the new session, which got the message passed on (`mainplane tail <id>` shows it under "The last message, which it did not answer").
 
 ## Gotchas
 

@@ -49,7 +49,6 @@ type bridge struct {
 
 	mu        sync.Mutex
 	following map[string]bool // session ids with a follower running
-	auto      map[string]bool // sessions made because the one before ran out of context
 	st        state
 }
 
@@ -76,7 +75,6 @@ func main() {
 		path:      statePath(),
 		tester:    os.Getenv("MAINPLANE_DISCORD_TESTER"),
 		following: map[string]bool{},
-		auto:      map[string]bool{},
 	}
 	b.load()
 	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
@@ -319,18 +317,11 @@ func contextFull(body string) bool {
 	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
 }
 
-// continueFull is /continue, run by the bot when the thread's session ends at
-// its context limit, as Mainplane intends a full session to go on. It does
-// not run again for a session it made this way that filled up before
-// replying, which would only loop.
-func (b *bridge) continueFull(thread, id string, spoke bool) {
-	b.mu.Lock()
-	again := b.auto[id] && !spoke
-	b.mu.Unlock()
-	if again {
-		b.say(thread, "-# not continuing again: the last automatic continuation filled up before it replied. /continue or /model to go on")
-		return
-	}
+// continueFull is /continue, run by the bot when the thread's session ends
+// at its context limit (error record n), as Mainplane intends a full session
+// to go on. The new session gets the last message the full one did not
+// answer, so it answers what was just asked.
+func (b *bridge) continueFull(thread, id string, n int) {
 	th, err := b.dc.State.Channel(thread)
 	if err != nil {
 		if th, err = b.dc.Channel(thread); err != nil {
@@ -338,14 +329,32 @@ func (b *bridge) continueFull(thread, id string, spoke bool) {
 			return
 		}
 	}
-	next, err := b.continueIn(th, id, "context-full-"+id, "", "The session before ran out of context. Carry on where it stopped.")
-	if err != nil {
-		b.say(thread, "automatic /continue failed: "+err.Error())
-		return
+	text := "The session before ran out of context. Carry on where it stopped."
+	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
+		if m := lastUnanswered(recs); m != "" {
+			text += "\nThe last message, which it did not answer:\n" + m
+		}
 	}
-	b.mu.Lock()
-	b.auto[next] = true
-	b.mu.Unlock()
+	if _, err := b.continueIn(th, id, "context-full-"+id, "", text); err != nil {
+		b.say(thread, "automatic /continue failed: "+err.Error())
+	}
+}
+
+// lastUnanswered is the newest text message, from a person or a connector,
+// with no agent reply after it, or "". A retry, a job's report and a
+// continuation's own first message do not count.
+func lastUnanswered(recs []statefile.Record) string {
+	last := ""
+	for _, r := range recs {
+		switch {
+		case r.Kind == statefile.Text:
+			last = ""
+		case r.Kind == statefile.Message && strings.HasPrefix(r.Type, "text/plain") &&
+			r.Via != "retry" && r.Via != "job" && !strings.HasPrefix(string(r.Body), continuePrefix):
+			last = string(r.Body)
+		}
+	}
+	return last
 }
 
 // continuePrefix starts the first message of a session that continues
@@ -558,7 +567,6 @@ func (b *bridge) follow(thread, id string, n int) {
 	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
-		spoke := false // the agent replied since this follower began
 		for {
 			recs, err := b.records(id, n, "60s")
 			var refused *refusedError
@@ -578,13 +586,12 @@ func (b *bridge) follow(thread, id string, n int) {
 				n = r.N
 				switch r.Kind {
 				case statefile.Text:
-					spoke = true
 					b.say(thread, string(r.Body))
 				case statefile.Error:
 					if contextFull(string(r.Body)) && b.shows(thread, id) {
 						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
 						b.relayed(id, r.N)
-						b.continueFull(thread, id, spoke)
+						b.continueFull(thread, id, r.N)
 						continue
 					}
 					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
