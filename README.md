@@ -7,6 +7,7 @@ Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a priva
 - Messages in a thread continue the session; the agent's replies come back there, and messages sent from elsewhere show quoted with their source (`> **cli:** …`). A thread whose session is deleted is archived and locked. When a session gets a name, its thread is renamed `<id> <name>`.
 - While the agent works, one status message shows when the turn started, its tool calls (the last three) and a Stop button; it shrinks to `-# 14 calls · 2m31s · 38% context` when the turn ends. The final reply is a Discord reply to the message it answers, and notifies you when the turn took over two minutes.
 - Each message sent to a session gets a reaction: 👀 while the agent works, then ✅ or ❌. The start messages in a channel show how each session's last turn went.
+- Files sent with a message go to the session: images the model takes as images (up to 5 MiB), text files inline (up to 200 KiB). Others are listed as not sent.
 - A failed step (not a stop) comes with a Retry button and a model picker; picking a model is `/model <id>`.
 - Thread commands, as in the terminal app and CLI (`!` works too):
   - `/model` shows a picker of the connected models; `/model <id> [message]` continues in a new session on that model, with the same workers. Use it when a provider's quota runs out.

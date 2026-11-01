@@ -11,7 +11,7 @@ The user-facing behavior of the mainplane-discord bot, one file per feature. Rea
 
 ## Driving conventions
 
-- Type as the tester with `scripts/say.sh <channel or thread id> "<text>"`; read results with `scripts/thread.sh`.
+- Type as the tester with `scripts/say.sh <channel or thread id> "<text>" [file...]`; read results with `scripts/thread.sh`.
 - Start a fresh thread per feature, with a first message that says what the run is (`verify <feature> <run id>`).
 - Agent replies cost model usage: keep prompts tiny, such as `reply with the word ok`.
 
@@ -25,6 +25,7 @@ The user-facing behavior of the mainplane-discord bot, one file per feature. Rea
 
 - [new-session.md](new-session.md): a channel message starts a session and its thread.
 - [turn-status.md](turn-status.md): the status message, its Stop button, and the final reply.
+- [files.md](files.md): images and text files sent with a message.
 - [thread-commands.md](thread-commands.md): /model, /continue, /retry, /stop, /info.
 - [continuations.md](continuations.md): a thread follows a continuation made in the terminal app.
 - [mirroring.md](mirroring.md): a session made outside Discord gets a thread in #sessions.
