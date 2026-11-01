@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -120,5 +121,20 @@ func TestGone(t *testing.T) {
 		if got := c.err.gone(); got != c.want {
 			t.Errorf("gone(%q) = %v", c.err.msg, got)
 		}
+	}
+}
+
+func TestThreadTitle(t *testing.T) {
+	long := strings.Repeat("word ", 40)
+	for _, c := range []struct{ id, label, want string }{
+		{"5b733adb", "Fix Discord rename limit", "5b733adb Fix Discord rename limit"},
+		{"5b733adb", "  two\nlines ", "5b733adb two lines"},
+	} {
+		if got := threadTitle(c.id, c.label); got != c.want {
+			t.Errorf("threadTitle(%q) = %q, want %q", c.label, got, c.want)
+		}
+	}
+	if got := threadTitle("5b733adb", long); len([]rune(got)) > 100 || !strings.HasSuffix(got, "…") {
+		t.Errorf("threadTitle(long) = %q (%d runes), want at most 100 ending in …", got, len([]rune(got)))
 	}
 }

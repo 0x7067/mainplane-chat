@@ -460,6 +460,16 @@ func (b *bridge) mirror(channel, id, via, model, first string) {
 	b.follow(th.ID, id, 0)
 }
 
+// threadTitle is a thread's name for a session with a label: "<id> <label>",
+// on one line and within Discord's 100 characters.
+func threadTitle(id, label string) string {
+	t := id + " " + strings.Join(strings.Fields(label), " ")
+	if r := []rune(t); len(r) > 100 {
+		t = strings.TrimSpace(string(r[:99])) + "…"
+	}
+	return t
+}
+
 // quote shows a message sent from outside Discord in a thread, with where it
 // came from: "> **cli:** fix the build".
 func quote(via, body string) string {
@@ -653,6 +663,16 @@ func (b *bridge) follow(thread, id string, n int) {
 				case statefile.Message:
 					if r.Via != via && strings.HasPrefix(r.Type, "text/plain") {
 						b.say(thread, quote(r.Via, string(r.Body)))
+					}
+				case statefile.Name:
+					// The session's label, often set by its agent at the start: the
+					// thread takes it. A rename past Discord's limit of about two per
+					// ten minutes waits here, in this session's follower only.
+					if b.shows(thread, id) && len(r.Body) > 0 {
+						name := threadTitle(id, string(r.Body))
+						if _, err := b.dc.ChannelEdit(thread, &discordgo.ChannelEdit{Name: name}); err != nil {
+							log.Printf("rename thread %s: %v", thread, err)
+						}
 					}
 				case statefile.Error:
 					if contextFull(string(r.Body)) && b.shows(thread, id) {
