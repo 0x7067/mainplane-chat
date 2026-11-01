@@ -91,6 +91,7 @@ func main() {
 	dc.SyncEvents = true
 	dc.AddHandler(b.onMessage)
 	dc.AddHandler(b.onReady)
+	dc.AddHandler(b.onInteraction)
 	b.dc = dc
 	if err := dc.Open(); err != nil {
 		log.Fatal(err)
@@ -611,7 +612,7 @@ func (b *bridge) post(thread, id, msgID, text string) {
 		b.say(thread, "send failed: "+err.Error())
 		return
 	}
-	b.follow(thread, id, out.N)
+	b.follow(thread, id, out.N-1) // from the message itself, the reply's target
 }
 
 // follow long-polls the session after record n and relays what the agent
@@ -634,6 +635,7 @@ func (b *bridge) follow(thread, id string, n int) {
 	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
+		var t turn
 		for {
 			recs, err := b.records(id, n, "60s")
 			var refused *refusedError
@@ -657,10 +659,23 @@ func (b *bridge) follow(thread, id string, n int) {
 			}
 			for _, r := range recs {
 				n = r.N
+				if t.start.IsZero() && (r.Kind == statefile.Message || r.Kind == statefile.Text || r.Kind == statefile.Call) {
+					t.start = r.Time
+				}
 				switch r.Kind {
 				case statefile.Text:
-					b.say(thread, string(r.Body))
+					t.text = append(t.text, string(r.Body))
+				case statefile.Step:
+					if t.stepCalls > 0 {
+						b.say(thread, strings.Join(t.text, "\n\n"))
+						t.text, t.stepCalls = nil, 0
+					} else {
+						b.finish(thread, id, &t, "")
+					}
 				case statefile.Message:
+					if r.Via == via && snowflake(r.IdempotencyKey) {
+						t.key = r.IdempotencyKey
+					}
 					if r.Via != via && strings.HasPrefix(r.Type, "text/plain") {
 						b.say(thread, quote(r.Via, string(r.Body)))
 					}
@@ -675,6 +690,7 @@ func (b *bridge) follow(thread, id string, n int) {
 						}
 					}
 				case statefile.Error:
+					b.finish(thread, id, &t, "failed")
 					if contextFull(string(r.Body)) && b.shows(thread, id) {
 						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
 						b.relayed(id, r.N)
@@ -684,12 +700,137 @@ func (b *bridge) follow(thread, id string, n int) {
 					b.say(thread, "⚠️ "+string(r.Body)+"\n-# /retry, or /model to continue on another model")
 				case statefile.Call:
 					_ = b.dc.ChannelTyping(thread)
-					b.say(thread, "-# "+callLine(r.Body))
+					t.calls++
+					t.stepCalls++
+					t.last = append(t.last, callLine(r.Body))[max(0, len(t.last)-2):]
+					t.dirty = true
 				}
-				b.relayed(id, n)
+				// Text waiting for its step is not relayed yet, so a restart
+				// shows it again.
+				if len(t.text) == 0 {
+					b.relayed(id, n)
+				}
+			}
+			if t.dirty {
+				b.showStatus(thread, id, &t)
 			}
 		}
 	}()
+}
+
+// turn is what a follower shows of the agent's work since a person last
+// spoke: one status message, edited as calls come, and then the reply.
+type turn struct {
+	start     time.Time
+	key       string   // the Discord message the reply answers, if any
+	calls     int      // tool calls so far
+	stepCalls int      // calls of the step not yet closed
+	last      []string // the newest call lines
+	text      []string // text of the step not yet closed
+	status    string   // the status message, once posted
+	dirty     bool     // calls the status message does not show yet
+}
+
+// showStatus posts or edits the turn's status message: when it started, in a
+// timestamp Discord keeps live, the calls, and a Stop button.
+func (b *bridge) showStatus(thread, id string, t *turn) {
+	content := fmt.Sprintf("**working** · started <t:%d:R> · %d calls", t.start.Unix(), t.calls)
+	for _, l := range t.last {
+		content += "\n-# " + l
+	}
+	comps := []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
+		discordgo.Button{Label: "Stop", Style: discordgo.SecondaryButton, CustomID: "stop:" + id},
+	}}}
+	t.dirty = false
+	if t.status == "" {
+		m, err := b.dc.ChannelMessageSendComplex(thread, &discordgo.MessageSend{
+			Content: content, Components: comps,
+			AllowedMentions: &discordgo.MessageAllowedMentions{}, Flags: discordgo.MessageFlagsSuppressEmbeds,
+		})
+		if err != nil {
+			log.Printf("status %s: %v", id, err)
+			return
+		}
+		t.status = m.ID
+		return
+	}
+	if _, err := b.dc.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: t.status, Channel: thread, Content: &content, Components: &comps}); err != nil {
+		log.Printf("status %s: %v", id, err)
+	}
+}
+
+// finish ends the turn: the status message shrinks to one line, and the
+// waiting text goes out as a reply to the message that began the turn. A
+// reply after a long turn notifies its author. outcome is "" or "failed".
+func (b *bridge) finish(thread, id string, t *turn, outcome string) {
+	took := time.Since(t.start).Round(time.Second)
+	if t.status != "" {
+		line := fmt.Sprintf("-# %d calls · %s", t.calls, took)
+		if outcome != "" {
+			line = fmt.Sprintf("-# %s after %d calls · %s", outcome, t.calls, took)
+		} else if i, err := b.info(id); err == nil && i.Config.ContextLimit > 0 {
+			line += fmt.Sprintf(" · %d%% context", i.ContextUsed*100/i.Config.ContextLimit)
+		}
+		none := []discordgo.MessageComponent{}
+		if _, err := b.dc.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: t.status, Channel: thread, Content: &line, Components: &none}); err != nil {
+			log.Printf("status %s: %v", id, err)
+		}
+	}
+	text, key := strings.Join(t.text, "\n\n"), t.key
+	*t = turn{}
+	if text == "" {
+		return
+	}
+	long := took > 2*time.Minute
+	mentions := &discordgo.MessageAllowedMentions{RepliedUser: long}
+	var ref *discordgo.MessageReference
+	switch {
+	case key != "" && key != thread:
+		ref = &discordgo.MessageReference{MessageID: key, ChannelID: thread}
+	case key == thread && long:
+		// A thread's id is its starter message's, which is in the parent
+		// channel, and Discord refuses a reply across channels: mention.
+		if th, err := b.dc.Channel(thread); err == nil {
+			if m, err := b.dc.ChannelMessage(th.ParentID, key); err == nil {
+				text = m.Author.Mention() + " " + text
+				mentions.Users = []string{m.Author.ID}
+			}
+		}
+	}
+	for i, part := range split(text, 1900) {
+		msg := &discordgo.MessageSend{Content: part, AllowedMentions: mentions, Flags: discordgo.MessageFlagsSuppressEmbeds}
+		if i == 0 {
+			msg.Reference = ref
+		}
+		if _, err := b.dc.ChannelMessageSendComplex(thread, msg); err != nil {
+			log.Printf("discord send: %v", err)
+		}
+	}
+}
+
+// snowflake is whether s is a Discord id, as a message's idempotency key is
+// when the bot posted it for a Discord message.
+func snowflake(s string) bool {
+	return s != "" && strings.Trim(s, "0123456789") == ""
+}
+
+// onInteraction runs a button as the thread command it names: "stop:<id>"
+// is !stop on session id.
+func (b *bridge) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
+	if i.Type != discordgo.InteractionMessageComponent {
+		return
+	}
+	action, id, _ := strings.Cut(i.MessageComponentData().CustomID, ":")
+	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
+		log.Printf("interaction: %v", err)
+	}
+	th, err := s.State.Channel(i.ChannelID)
+	if err != nil {
+		if th, err = s.Channel(i.ChannelID); err != nil {
+			return
+		}
+	}
+	b.command(th, id, i.ID, "!"+action)
 }
 
 func (b *bridge) shows(thread, id string) bool {
