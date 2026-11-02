@@ -1,4 +1,4 @@
-module github.com/0x7067/mainplane-discord
+module github.com/0x7067/mainplane-chat
 
 go 1.27.0
 

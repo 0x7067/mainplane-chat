@@ -1,9 +1,13 @@
-// mainplane-discord drives Mainplane agents from a private Discord server, the
-// way the mainplane terminal app does. A message in any channel starts a
-// session in a new thread named after it; messages in that thread continue it,
-// and the agent's replies come back there. A thread takes the terminal app's
-// /model, /continue and /stop, and the CLI's /retry and /info. What happens
-// while the bot is down is picked up when it comes back.
+// mainplane-chat drives Mainplane agents from chat apps, the way the
+// mainplane terminal app does. A message in a channel starts a session in a
+// new thread; messages in that thread continue it, and the agent's replies
+// come back there. A thread takes the terminal app's /model, /continue and
+// /stop, and the CLI's /retry and /info. What happens while the bot is down is
+// picked up when it comes back.
+//
+// This file is the core: the harness client, following sessions, commands,
+// continuations and the state. Each chat app is an adapter (discord.go) that
+// turns its events into calls of the core and shows what the core says.
 package main
 
 import (
@@ -24,18 +28,15 @@ import (
 	"os/signal"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
-	"github.com/bwmarrin/discordgo"
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
 )
-
-const via = "discord"
 
 // The catalog groups the terminal app reads: the models it offers, and the
 // ones a new session takes when the newest session's is not connected.
@@ -44,28 +45,71 @@ const (
 	defaults = "self-hosted-default"
 )
 
+// maxAttach is the largest file an agent's "attach: /path" sends: Discord's
+// upload limit.
+const maxAttach = 20 << 20
+
 type bridge struct {
-	dc      *discordgo.Session
 	harness string // base URL of the harness API
 	key     string
-	path    string // the state file
-	tester  string // a bot user id whose messages count as a person's, for end-to-end tests
+	path    string          // the state file
+	dc      *discord        // for mirroring, which only Discord does
+	chats   map[string]chat // platform -> its adapter; the platform is also the via of its messages
 
 	mu        sync.Mutex
-	following map[string]bool // session ids with a follower running
-	sessions  string          // the #sessions channel, where sessions made outside Discord get threads
+	following map[string]bool   // session ids with a follower running
+	renames   map[string]*title // thread -> the title it waits for, while its renamer runs
 	st        state
 }
 
 // state is kept across restarts, so the bot picks up what happened while it
-// was down.
+// was down. Its keys are "<platform>:<id>", as "discord:1565949504866222130".
 type state struct {
-	Seen    map[string]string `json:"seen"`    // channel or thread id -> newest Discord message handled
-	Relayed map[string]int    `json:"relayed"` // session id -> newest record relayed
-	Threads map[string]string `json:"threads"` // thread id -> the session it shows
-	// MirrorSince is when mirroring began: sessions made outside Discord after
-	// it get a thread in #sessions; older ones do not.
+	Seen    map[string]string `json:"seen"`    // channel or thread -> newest message handled there
+	Threads map[string]thread `json:"threads"` // thread -> what it shows
+	// MirrorSince is when mirroring began: sessions made outside the chats
+	// after it get a thread in #sessions; older ones do not.
 	MirrorSince time.Time `json:"mirror_since"`
+}
+
+type thread struct {
+	Session string `json:"session"`
+	N       int    `json:"n"` // the newest record relayed
+}
+
+// chat is what the core needs of a chat app. th is a thread's key.
+type chat interface {
+	say(th string, m msg)
+	// status posts or edits the turn's status message; t.done shrinks it.
+	status(th, id string, t *turn)
+	react(th, msgID, emoji string)
+	rename(th, id, name string)
+	// close shows that the thread's session is gone.
+	close(th string)
+}
+
+// msg is what the core says in a thread; the adapter formats it.
+type msg struct {
+	Text    string
+	Note    string // lines shown small, under Text
+	ReplyTo string // the message it answers
+	Notify  bool   // notify ReplyTo's author
+	Files   []file
+	Session string  // the session Retry and Models act on
+	Retry   bool    // a Retry button: /retry
+	Models  []model // a model picker: /model with the one picked
+}
+
+type model struct {
+	ID, Name string
+	Current  bool
+}
+
+// file is a file sent with a message, fetched only when needed.
+type file struct {
+	name, ctype string
+	size        int
+	fetch       func() ([]byte, error)
 }
 
 type info struct {
@@ -81,128 +125,42 @@ func main() {
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
 		path:      statePath(),
-		tester:    os.Getenv("MAINPLANE_DISCORD_TESTER"),
 		following: map[string]bool{},
+		renames:   map[string]*title{},
 	}
 	b.load()
-	dc, err := discordgo.New("Bot " + mustEnv("DISCORD_TOKEN"))
-	if err != nil {
-		log.Fatal(err)
-	}
-	dc.Identify.Intents = discordgo.IntentsGuilds | discordgo.IntentsGuildMessages | discordgo.IntentsMessageContent
-	// Events are handled one at a time, in order, and catching up on Ready
-	// finishes before the next message is handled.
-	dc.SyncEvents = true
-	dc.AddHandler(b.onMessage)
-	dc.AddHandler(b.onReady)
-	dc.AddHandler(b.onInteraction)
-	b.dc = dc
-	if err := dc.Open(); err != nil {
-		log.Fatal(err)
-	}
-	defer dc.Close()
-	log.Print("connected")
+	b.dc = newDiscord(b, mustEnv("DISCORD_TOKEN"), os.Getenv("MAINPLANE_DISCORD_TESTER"))
+	b.chats = map[string]chat{"discord": b.dc}
+	b.dc.open() // after b.chats is set, as catching up starts followers
+	defer b.dc.dc.Close()
 	go b.watchSessions()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 }
 
-// onReady follows the sessions of the active threads from the last record
-// relayed, then handles the messages sent while the bot was down. A channel
-// the bot has not seen before starts from now.
-func (b *bridge) onReady(s *discordgo.Session, r *discordgo.Ready) {
-	for _, g := range r.Guilds {
-		var chans []*discordgo.Channel
-		if threads, err := s.GuildThreadsActive(g.ID); err == nil {
-			for _, t := range threads.Threads {
-				if id := b.sessionFor(t); id != "" {
-					if n, ok := b.relayedFrom(id); ok {
-						b.follow(t.ID, id, n)
-					}
-				}
-				chans = append(chans, t)
-			}
-		}
-		if cs, err := s.GuildChannels(g.ID); err == nil {
-			for _, c := range cs {
-				if c.Type == discordgo.ChannelTypeGuildText {
-					chans = append(chans, c)
-					if c.Name == "sessions" {
-						b.mu.Lock()
-						b.sessions = c.ID
-						b.mu.Unlock()
-					}
-				}
-			}
-		}
-		for _, c := range chans {
-			b.replay(c)
-		}
-	}
-	log.Print("caught up")
+// platform is the chat app of a thread or channel key, which is also the via
+// of the messages sent from it.
+func platform(key string) string {
+	p, _, _ := strings.Cut(key, ":")
+	return p
 }
 
-// replay handles the messages in c after the newest one handled there.
-func (b *bridge) replay(c *discordgo.Channel) {
-	b.mu.Lock()
-	after, ok := b.st.Seen[c.ID]
-	b.mu.Unlock()
-	if !ok {
-		if c.LastMessageID != "" {
-			b.fresh(c.ID, c.LastMessageID)
-		}
-		return
-	}
-	for {
-		msgs, err := b.dc.ChannelMessages(c.ID, 100, "", after, "")
-		if err != nil || len(msgs) == 0 {
-			return
-		}
-		sort.Slice(msgs, func(i, j int) bool { return newer(msgs[j].ID, msgs[i].ID) })
-		for _, m := range msgs {
-			b.handle(m)
-		}
-		after = msgs[len(msgs)-1].ID
-		if len(msgs) < 100 {
-			return
-		}
-	}
-}
+func (b *bridge) chat(th string) chat { return b.chats[platform(th)] }
 
-func (b *bridge) onMessage(s *discordgo.Session, m *discordgo.MessageCreate) { b.handle(m.Message) }
+func (b *bridge) say(th string, m msg) { b.chat(th).say(th, m) }
 
-func (b *bridge) handle(m *discordgo.Message) {
-	if !b.fresh(m.ChannelID, m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != b.tester {
-		return
+// message handles a message sent in thread th, which shows session id: a
+// thread command, else a message to the session.
+func (b *bridge) message(th, id, msgID, text string, files []file) {
+	if !b.command(th, id, msgID, text) {
+		b.post(th, id, msgID, text, files)
 	}
-	text := strings.TrimSpace(m.Content)
-	if text == "" && len(m.Attachments) == 0 {
-		return
-	}
-	ch, err := b.dc.State.Channel(m.ChannelID)
-	if err != nil {
-		if ch, err = b.dc.Channel(m.ChannelID); err != nil {
-			return
-		}
-	}
-	if !ch.IsThread() {
-		b.start(m, text)
-		return
-	}
-	id := b.sessionFor(ch)
-	if id == "" {
-		return
-	}
-	if b.command(ch, id, m.ID, text) {
-		return
-	}
-	b.post(ch.ID, id, m.ID, text, m.Attachments)
 }
 
 // command runs a thread command and reports whether text was one. /model and
 // /continue take a message for the session they make.
-func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
+func (b *bridge) command(th, id, msgID, text string) bool {
 	fields := strings.Fields(text)
 	if len(fields) == 0 {
 		return false
@@ -215,20 +173,18 @@ func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
 	var err error
 	switch word[1:] {
 	case "stop":
-		err = b.call("POST", "/sessions/"+id+"/stop?via="+via, "", nil, nil)
+		err = b.call("POST", "/sessions/"+id+"/stop?via="+platform(th), "", nil, nil)
 	case "retry":
-		if err = b.call("POST", "/sessions/"+id+"/retry?via="+via, "", nil, nil); err == nil {
-			if n, ok := b.relayedFrom(id); ok {
-				b.follow(th.ID, id, n)
-			}
+		if err = b.call("POST", "/sessions/"+id+"/retry?via="+platform(th), "", nil, nil); err == nil {
+			b.resume(th, id)
 		}
 	case "info":
-		err = b.sayInfo(th.ID, id)
+		err = b.sayInfo(th, id)
 	case "continue":
 		_, err = b.continueIn(th, id, msgID, "", rest)
 	case "model":
 		if rest == "" {
-			err = b.listModels(th.ID, id)
+			err = b.listModels(th, id)
 			break
 		}
 		model := strings.Fields(rest)[0]
@@ -237,35 +193,29 @@ func (b *bridge) command(th *discordgo.Channel, id, msgID, text string) bool {
 		return false
 	}
 	if err != nil {
-		b.say(th.ID, word+" failed: "+err.Error())
+		b.say(th, msg{Text: word + " failed: " + err.Error()})
 	}
 	return true
 }
 
-// start makes a session with the config newConf picks and a thread for it
-// named "<session id> <first words>".
-func (b *bridge) start(m *discordgo.Message, text string) {
+// start makes a session for a message in a channel, with the config newConf
+// picks; open makes the message's thread for the session and returns its key.
+func (b *bridge) start(via string, open func(id string) (string, error), msgID, text string, files []file) error {
 	conf, err := b.newConf()
 	if err != nil {
-		b.say(m.ChannelID, "could not start a session: "+err.Error())
-		return
+		return fmt.Errorf("could not start a session: %w", err)
 	}
-	id, err := b.create(conf)
+	id, err := b.create(conf, via)
 	if err != nil {
-		b.say(m.ChannelID, "could not start a session: "+err.Error())
-		return
+		return fmt.Errorf("could not start a session: %w", err)
 	}
-	label := text
-	if label == "" {
-		label = m.Attachments[0].Filename // a message with only files
-	}
-	name := id + " " + firstWords(label, 80)
-	th, err := b.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: name, AutoArchiveDuration: 10080})
+	th, err := open(id)
 	if err != nil {
-		b.say(m.ChannelID, "session "+id+" started, but the thread failed: "+err.Error())
-		return
+		return fmt.Errorf("session %s started, but the thread failed: %w", id, err)
 	}
-	b.post(th.ID, id, m.ID, text, m.Attachments)
+	b.bind(th, id, 0)
+	b.post(th, id, msgID, text, files)
+	return nil
 }
 
 // newConf is the config of a new session, picked as the terminal app picks
@@ -301,8 +251,9 @@ func (b *bridge) newConf() (statefile.Conf, error) {
 
 // continueIn is /continue, and /model with a model: a new session with this
 // one's config, or the model's and this one's workers, told to carry on from
-// this one, as the terminal app does. The thread then shows the new session.
-func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text string) (string, error) {
+// this one, as the terminal app does. The thread then shows the new session,
+// from before its first message, so the watch does not move it again.
+func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) {
 	cur, err := b.info(old)
 	if err != nil {
 		return "", err
@@ -320,16 +271,17 @@ func (b *bridge) continueIn(th *discordgo.Channel, old, msgID, model, text strin
 		conf = presetConf(id, cat.Presets[id])
 		conf.Workers = cur.Config.Workers
 	}
-	id, err := b.create(conf)
+	id, err := b.create(conf, platform(th))
 	if err != nil {
 		return "", err
 	}
-	b.say(th.ID, "-# continuing in session "+id+" on "+conf.Model)
-	msg := "You are continuing session " + old + ". Retrieve key context from it as you go."
+	b.bind(th, id, 0)
+	b.say(th, msg{Note: "continuing in session " + id + " on " + conf.Model})
+	m := continuePrefix + old + ". Retrieve key context from it as you go."
 	if text != "" {
-		msg += "\n" + text
+		m += "\n" + text
 	}
-	b.post(th.ID, id, msgID, msg, nil)
+	b.post(th, id, msgID, m, nil)
 	return id, nil
 }
 
@@ -339,26 +291,23 @@ func contextFull(body string) bool {
 	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
 }
 
+// fullKey starts the idempotency key of the first message of a session the
+// bot continues because the one before was full; the full session's id ends it.
+const fullKey = "context-full-"
+
 // continueFull is /continue, run by the bot when the thread's session ends
 // at its context limit (error record n), as Mainplane intends a full session
 // to go on. The new session gets the last message the full one did not
 // answer, so it answers what was just asked.
-func (b *bridge) continueFull(thread, id string, n int) {
-	th, err := b.dc.State.Channel(thread)
-	if err != nil {
-		if th, err = b.dc.Channel(thread); err != nil {
-			log.Printf("continue %s: %v", id, err)
-			return
-		}
-	}
+func (b *bridge) continueFull(th, id string, n int) {
 	text := "The session before ran out of context. Carry on where it stopped."
 	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
 		if m := lastUnanswered(recs); m != "" {
 			text += "\nThe last message, which it did not answer:\n" + m
 		}
 	}
-	if _, err := b.continueIn(th, id, "context-full-"+id, "", text); err != nil {
-		b.say(thread, "automatic /continue failed: "+err.Error())
+	if _, err := b.continueIn(th, id, fullKey+id, "", text); err != nil {
+		b.say(th, msg{Text: "automatic /continue failed: " + err.Error()})
 	}
 }
 
@@ -396,14 +345,18 @@ func continued(msg string) string {
 	return ""
 }
 
-// watchSessions keeps Discord in step with sessions made anywhere. A session
-// that continues one a thread shows moves that thread to it; one made outside
-// Discord after mirroring began gets its own thread in #sessions. Mainplane
-// has no event for a new session, so this reads the list every few seconds,
-// as the terminal app's sidebar does. A session is checked once it has its
-// first message; only sessions made in the last day are.
+// watchSessions keeps the threads in step with sessions made anywhere. A
+// session that continues one a thread shows moves that thread to it; one made
+// outside the chats after mirroring began gets its own thread in #sessions,
+// unless a thread shows it or it was continued. Mainplane has no event for a
+// new session, so this reads the list every few seconds, as the terminal
+// app's sidebar does. A session is checked once it has its first message;
+// only sessions made in the last day are.
 func (b *bridge) watchSessions() {
 	checked := map[string]bool{}
+	// Sessions another continues: their thread, if any, has moved on. The list
+	// is newest first, so a continuation is read before the session it continues.
+	moved := map[string]bool{}
 	for ; ; time.Sleep(3 * time.Second) {
 		var infos []struct {
 			ID      string
@@ -418,62 +371,45 @@ func (b *bridge) watchSessions() {
 			if checked[in.ID] || time.Since(in.Created) > 24*time.Hour {
 				continue
 			}
-			first, via, ok := b.firstMessage(in.ID)
+			first, from, ok := b.firstMessage(in.ID)
 			if !ok {
 				continue
 			}
-			if old := continued(first); old != "" {
-				if threads := b.threadsShowing(old); len(threads) > 0 {
-					checked[in.ID] = true
-					for _, thread := range threads {
-						b.follow(thread, in.ID, 0)
-						b.say(thread, "-# continued in session "+in.ID)
-					}
-					continue
-				}
+			old := continued(first)
+			if old != "" {
+				moved[old] = true
 			}
-			b.mu.Lock()
-			channel, since := b.sessions, b.st.MirrorSince
-			// A session a thread ever followed, kept across restarts: its thread
-			// may since have moved to a continuation.
-			_, followed := b.st.Relayed[in.ID]
-			b.mu.Unlock()
-			if !mirrored(via, in.Created, since) || followed {
+			if len(b.threadsShowing(in.ID)) > 0 {
 				checked[in.ID] = true
 				continue
 			}
-			if channel == "" {
-				continue // #sessions not found yet; check again
+			if threads := b.threadsShowing(old); old != "" && len(threads) > 0 {
+				checked[in.ID] = true
+				for _, th := range threads {
+					b.follow(th, in.ID, 0)
+					b.say(th, msg{Note: "continued in session " + in.ID})
+				}
+				continue
+			}
+			b.mu.Lock()
+			since := b.st.MirrorSince
+			b.mu.Unlock()
+			if _, ours := b.chats[from]; ours || moved[in.ID] || !in.Created.After(since) {
+				checked[in.ID] = true
+				continue
+			}
+			th, err := b.dc.mirror(in.ID, from, in.Config.Model, first)
+			if errors.Is(err, errNoSessions) {
+				continue // check again once #sessions is found
 			}
 			checked[in.ID] = true
-			b.mirror(channel, in.ID, via, in.Config.Model, first)
+			if err != nil {
+				log.Printf("mirror %s: %v", in.ID, err)
+				continue
+			}
+			b.follow(th, in.ID, 0)
 		}
 	}
-}
-
-// mirrored is whether a session gets a thread in #sessions: its first
-// message came from outside Discord, after mirroring began.
-func mirrored(from string, created, since time.Time) bool {
-	return from != via && created.After(since)
-}
-
-// mirror makes a thread in #sessions for a session made outside Discord and
-// follows it from its start, its first message included.
-func (b *bridge) mirror(channel, id, via, model, first string) {
-	m, err := b.dc.ChannelMessageSendComplex(channel, &discordgo.MessageSend{
-		Content:         fmt.Sprintf("`%s` · via %s · %s", id, via, model),
-		AllowedMentions: &discordgo.MessageAllowedMentions{},
-	})
-	if err != nil {
-		log.Printf("mirror %s: %v", id, err)
-		return
-	}
-	th, err := b.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(first, 80), AutoArchiveDuration: 10080})
-	if err != nil {
-		log.Printf("mirror %s: %v", id, err)
-		return
-	}
-	b.follow(th.ID, id, 0)
 }
 
 // threadTitle is a thread's name for a session with a label: "<id> <label>",
@@ -486,8 +422,8 @@ func threadTitle(id, label string) string {
 	return t
 }
 
-// quote shows a message sent from outside Discord in a thread, with where it
-// came from: "> **cli:** fix the build".
+// quote shows a message sent from elsewhere in a thread, with where it came
+// from: "> **cli:** fix the build".
 func quote(via, body string) string {
 	lines := strings.Split(strings.TrimRight(body, "\n"), "\n")
 	lines[0] = "**" + via + ":** " + lines[0]
@@ -512,48 +448,46 @@ func (b *bridge) threadsShowing(id string) []string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var ts []string
-	for t, s := range b.st.Threads {
-		if s == id {
-			ts = append(ts, t)
+	for k, t := range b.st.Threads {
+		if t.Session == id {
+			ts = append(ts, k)
 		}
 	}
 	return ts
 }
 
 // listModels is /model alone: a picker of the connected models.
-func (b *bridge) listModels(thread, id string) error {
-	picker, err := b.modelPicker(id)
+func (b *bridge) listModels(th, id string) error {
+	ms, err := b.modelList(id)
 	if err != nil {
 		return err
 	}
-	b.say(thread, "-# continue in a new session on another model, or `/model <id> [message]`", picker...)
+	b.say(th, msg{Note: "continue in a new session on another model, or `/model <id> [message]`", Session: id, Models: ms})
 	return nil
 }
 
-// modelPicker is a select of the connected models, this session's chosen;
-// picking one is /model with it. Discord shows at most 25, the current first.
-func (b *bridge) modelPicker(id string) ([]discordgo.MessageComponent, error) {
+// modelList is the connected models, session id's first, so that a picker
+// that shows only some shows it.
+func (b *bridge) modelList(id string) ([]model, error) {
 	cat, ids, err := b.models()
 	if err != nil {
 		return nil, err
 	}
-	cur, _ := b.info(id)
-	var opts []discordgo.SelectMenuOption
-	if i := slices.Index(ids, cur.Config.Preset); i > 0 {
-		ids = slices.Concat(ids[i:i+1], ids[:i], ids[i+1:]) // first, so it is within the 25
-	}
-	for _, m := range ids[:min(len(ids), 25)] {
-		opts = append(opts, discordgo.SelectMenuOption{Label: cmp.Or(cat.Presets[m].Name, m), Value: m, Description: m, Default: m == cur.Config.Preset})
-	}
-	if len(opts) == 0 {
+	if len(ids) == 0 {
 		return nil, errors.New("no provider of the catalog is connected")
 	}
-	return []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-		discordgo.SelectMenu{MenuType: discordgo.StringSelectMenu, CustomID: "model:" + id, Placeholder: "Continue on another model", Options: opts},
-	}}}, nil
+	cur, _ := b.info(id)
+	if i := slices.Index(ids, cur.Config.Preset); i > 0 {
+		ids = slices.Concat(ids[i:i+1], ids[:i], ids[i+1:])
+	}
+	var ms []model
+	for _, m := range ids {
+		ms = append(ms, model{ID: m, Name: cmp.Or(cat.Presets[m].Name, m), Current: m == cur.Config.Preset})
+	}
+	return ms, nil
 }
 
-func (b *bridge) sayInfo(thread, id string) error {
+func (b *bridge) sayInfo(th, id string) error {
 	i, err := b.info(id)
 	if err != nil {
 		return err
@@ -562,8 +496,8 @@ func (b *bridge) sayInfo(thread, id string) error {
 	for _, w := range i.Config.Workers {
 		names = append(names, w.Name)
 	}
-	b.say(thread, fmt.Sprintf("session `%s` %s\nmodel `%s`\nworkers %s\ncontext %d/%d",
-		i.ID, i.Status, i.Config.Model, strings.Join(names, ", "), i.ContextUsed, i.Config.ContextLimit))
+	b.say(th, msg{Text: fmt.Sprintf("session `%s` %s\nmodel `%s`\nworkers %s\ncontext %d/%d",
+		i.ID, i.Status, i.Config.Model, strings.Join(names, ", "), i.ContextUsed, i.Config.ContextLimit)})
 	return nil
 }
 
@@ -619,7 +553,7 @@ func (b *bridge) workers() ([]statefile.Worker, error) {
 	return all, nil
 }
 
-func (b *bridge) create(conf statefile.Conf) (string, error) {
+func (b *bridge) create(conf statefile.Conf, via string) (string, error) {
 	body, err := json.Marshal(conf)
 	if err != nil {
 		return "", err
@@ -629,13 +563,13 @@ func (b *bridge) create(conf statefile.Conf) (string, error) {
 	return out.ID, err
 }
 
-// post sends a Discord message's text and files to the session, keyed by the
+// post sends a chat message's text and files to the session, keyed by the
 // message so a repeat appends nothing, and makes sure the thread follows the
 // session. Each part is a record: the text, then each image.
-func (b *bridge) post(thread, id, msgID, text string, files []*discordgo.MessageAttachment) {
+func (b *bridge) post(th, id, msgID, text string, files []file) {
 	parts, skipped := b.parts(id, text, files)
 	if len(skipped) > 0 {
-		b.say(thread, "-# not sent: "+strings.Join(skipped, ", "))
+		b.say(th, msg{Note: "not sent: " + strings.Join(skipped, ", ")})
 	}
 	if len(parts) == 0 {
 		return
@@ -653,16 +587,16 @@ func (b *bridge) post(thread, id, msgID, text string, files []*discordgo.Message
 		mw.Close()
 		ctype = mw.FormDataContentType()
 	}
-	req, _ := http.NewRequest("POST", b.harness+"/sessions/"+id+"/records?via="+via, &body)
+	req, _ := http.NewRequest("POST", b.harness+"/sessions/"+id+"/records?via="+platform(th), &body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Idempotency-Key", msgID)
 	var out struct{ N int }
 	if err := b.do(req, &out); err != nil {
-		b.say(thread, "send failed: "+err.Error())
+		b.say(th, msg{Text: "send failed: " + err.Error()})
 		return
 	}
-	b.mark(thread, msgID, seen)
-	b.follow(thread, id, out.N-len(parts)) // from the message itself, the reply's target
+	b.chat(th).react(th, msgID, seen)
+	b.follow(th, id, out.N-len(parts)) // from the message itself, the reply's target
 }
 
 type part struct {
@@ -672,7 +606,7 @@ type part struct {
 
 // parts is what a message sends: its text, with text files inlined, then the
 // images the session's model takes. The rest are skipped, by file name.
-func (b *bridge) parts(id, text string, files []*discordgo.MessageAttachment) ([]part, []string) {
+func (b *bridge) parts(id, text string, files []file) ([]part, []string) {
 	var input []string
 	if len(files) > 0 {
 		if i, err := b.info(id); err == nil {
@@ -682,23 +616,23 @@ func (b *bridge) parts(id, text string, files []*discordgo.MessageAttachment) ([
 	var images []part
 	var skipped []string
 	for _, f := range files {
-		ctype, _, _ := mime.ParseMediaType(f.ContentType)
-		image := slices.Contains(input, ctype) && f.Size <= 5<<20
-		textual := (strings.HasPrefix(ctype, "text/") || ctype == "application/json") && f.Size <= 200<<10
+		ctype, _, _ := mime.ParseMediaType(f.ctype)
+		image := slices.Contains(input, ctype) && f.size <= 5<<20
+		textual := (strings.HasPrefix(ctype, "text/") || ctype == "application/json") && f.size <= 200<<10
 		var data []byte
 		var err error
 		if image || textual {
-			data, err = download(f.URL)
+			data, err = f.fetch()
 		}
 		switch {
 		case err != nil:
-			skipped = append(skipped, f.Filename+" ("+err.Error()+")")
+			skipped = append(skipped, f.name+" ("+err.Error()+")")
 		case image:
 			images = append(images, part{ctype, data})
 		case textual:
-			text += "\n\n" + f.Filename + ":\n```\n" + strings.TrimRight(string(data), "\n") + "\n```"
+			text += "\n\n" + f.name + ":\n```\n" + strings.TrimRight(string(data), "\n") + "\n```"
 		default:
-			skipped = append(skipped, f.Filename)
+			skipped = append(skipped, f.name)
 		}
 	}
 	var ps []part
@@ -708,49 +642,51 @@ func (b *bridge) parts(id, text string, files []*discordgo.MessageAttachment) ([
 	return append(ps, images...), skipped
 }
 
-func download(url string) ([]byte, error) {
-	resp, err := http.Get(url)
-	if err != nil {
-		return nil, err
+// resume follows the session a thread shows from the last record relayed.
+func (b *bridge) resume(th, id string) {
+	b.mu.Lock()
+	t, ok := b.st.Threads[th]
+	b.mu.Unlock()
+	if ok && t.Session == id {
+		b.follow(th, id, t.N)
+		return
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("%s", resp.Status)
+	if i, err := b.info(id); err == nil {
+		b.follow(th, id, i.N)
 	}
-	return io.ReadAll(resp.Body)
 }
 
-// follow long-polls the session after record n and relays what the agent
-// says. Once the thread shows another session it goes on until this one has
-// been quiet for a poll, so a reply to a message sent before a quick /model
-// still arrives. It stops when the harness refuses the session, as for one
-// deleted.
-func (b *bridge) follow(thread, id string, n int) {
+// follow makes the thread show the session and long-polls the session after
+// record n, relaying what the agent says. Once the thread shows another
+// session it goes on until this one has been quiet for a poll, so a reply to
+// a message sent before a quick /model still arrives. It stops when the
+// harness refuses the session, as for one deleted.
+func (b *bridge) follow(th, id string, n int) {
+	b.bind(th, id, n)
 	b.mu.Lock()
-	if b.st.Threads[thread] != id {
-		b.st.Threads[thread] = id
-		b.save()
-	}
 	running := b.following[id]
 	b.following[id] = true
 	b.mu.Unlock()
 	if running {
 		return
 	}
-	b.relayed(id, n)
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
 		var t turn
 		for {
-			recs, err := b.records(id, n, "60s")
+			// Calls not shown yet, held back by the status throttle, show after a
+			// short poll at most.
+			wait := "60s"
+			if t.dirty {
+				wait = "3s"
+			}
+			recs, err := b.records(id, n, wait)
 			var refused *refusedError
 			if errors.As(err, &refused) {
 				log.Printf("session %s: %v; no longer following it", id, err)
-				if refused.gone() && b.shows(thread, id) {
-					yes := true
-					if _, err := b.dc.ChannelEdit(thread, &discordgo.ChannelEdit{Archived: &yes, Locked: &yes}); err != nil {
-						log.Printf("archive thread %s: %v", thread, err)
-					}
+				if refused.gone() && b.shows(th, id) {
+					b.chat(th).close(th)
+					b.forget(th)
 				}
 				return
 			}
@@ -759,150 +695,123 @@ func (b *bridge) follow(thread, id string, n int) {
 				time.Sleep(5 * time.Second)
 				continue
 			}
-			if len(recs) == 0 && !b.shows(thread, id) {
+			if len(recs) == 0 && !b.shows(th, id) {
 				return
 			}
 			for _, r := range recs {
 				n = r.N
-				if t.start.IsZero() && (r.Kind == statefile.Message || r.Kind == statefile.Text || r.Kind == statefile.Call) {
-					t.start = r.Time
-				}
-				switch r.Kind {
-				case statefile.Text:
-					t.text = append(t.text, string(r.Body))
-				case statefile.Step:
-					if t.stepCalls > 0 {
-						b.send(thread, strings.Join(t.text, "\n\n"), nil, &discordgo.MessageAllowedMentions{})
-						t.text, t.stepCalls = nil, 0
-					} else {
-						b.finish(thread, id, &t, "")
-					}
-				case statefile.Message:
-					if r.Via == via && snowflake(r.IdempotencyKey) && r.IdempotencyKey != t.key {
-						t.key = r.IdempotencyKey
-						t.asked = append(t.asked, r.IdempotencyKey)
-					}
-					// The harness's own "Continue" from a retry is not a person's, and
-					// a job's report is one line: its log tail floods the thread.
-					switch {
-					case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
-						b.say(thread, "-# "+jobLine(string(r.Body)))
-					case r.Via != via && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
-						b.say(thread, quote(r.Via, string(r.Body)))
-					}
-				case statefile.Name:
-					// The session's label, often set by its agent at the start: the
-					// thread takes it. A rename past Discord's limit of about two per
-					// ten minutes waits here, in this session's follower only.
-					if b.shows(thread, id) && len(r.Body) > 0 {
-						name := threadTitle(id, string(r.Body))
-						if _, err := b.dc.ChannelEdit(thread, &discordgo.ChannelEdit{Name: name}); err != nil {
-							log.Printf("rename thread %s: %v", thread, err)
-						}
-					}
-				case statefile.Error:
-					outcome := "failed"
-					if r.Via != "" { // who stopped it
-						outcome = "stopped"
-					}
-					b.finish(thread, id, &t, outcome)
-					if contextFull(string(r.Body)) && b.shows(thread, id) {
-						b.say(thread, "⚠️ "+string(r.Body)+"\n-# the context is full: continuing in a new session")
-						b.relayed(id, r.N)
-						b.continueFull(thread, id, r.N)
-						continue
-					}
-					if r.Via != "" { // a stop: on purpose, so no Retry to offer
-						b.say(thread, "⚠️ "+string(r.Body))
-						break
-					}
-					retry := discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-						discordgo.Button{Label: "Retry", Style: discordgo.PrimaryButton, CustomID: "retry:" + id},
-					}}
-					picker, err := b.modelPicker(id)
-					if err != nil {
-						log.Printf("models: %v", err)
-					}
-					b.say(thread, "⚠️ "+string(r.Body), append([]discordgo.MessageComponent{retry}, picker...)...)
-				case statefile.Call:
-					_ = b.dc.ChannelTyping(thread)
-					t.calls++
-					t.stepCalls++
-					t.last = append(t.last, callLine(r.Body))[max(0, len(t.last)-2):]
-					t.dirty = true
-				}
+				b.relay(th, id, &t, r)
 				// Text waiting for its step is not relayed yet, so a restart
 				// shows it again.
 				if len(t.text) == 0 {
-					b.relayed(id, n)
+					b.advance(th, id, n)
 				}
 			}
-			if t.dirty {
-				b.showStatus(thread, id, &t)
+			if t.dirty && time.Since(t.shown) >= 3*time.Second {
+				t.dirty, t.shown = false, time.Now()
+				b.chat(th).status(th, id, &t)
 			}
 		}
 	}()
+}
+
+// relay shows one record of session id in thread th.
+func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
+	if t.start.IsZero() && (r.Kind == statefile.Message || r.Kind == statefile.Text || r.Kind == statefile.Call) {
+		t.start = r.Time
+	}
+	switch r.Kind {
+	case statefile.Text:
+		t.text = append(t.text, string(r.Body))
+	case statefile.Step:
+		if t.stepCalls > 0 {
+			b.reply(th, strings.Join(t.text, "\n\n"), "", false)
+			t.text, t.stepCalls = nil, 0
+		} else {
+			b.finish(th, id, t, "")
+		}
+	case statefile.Message:
+		// A message the thread sent: the turn's reply answers it.
+		if r.Via == platform(th) && r.IdempotencyKey != "" && !strings.HasPrefix(r.IdempotencyKey, fullKey) && r.IdempotencyKey != t.key {
+			t.key = r.IdempotencyKey
+			t.asked = append(t.asked, r.IdempotencyKey)
+		}
+		// The harness's own "Continue" from a retry is not a person's, and
+		// a job's report is one line: its log tail floods the thread.
+		switch {
+		case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
+			b.say(th, msg{Note: jobLine(string(r.Body))})
+		case r.Via != platform(th) && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
+			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
+		}
+	case statefile.Name:
+		// The session's label, often set by its agent at the start: the thread
+		// takes it.
+		if b.shows(th, id) && len(r.Body) > 0 {
+			b.rename(th, id, string(r.Body))
+		}
+	case statefile.Error:
+		outcome := "failed"
+		if r.Via != "" { // who stopped it
+			outcome = "stopped"
+		}
+		b.finish(th, id, t, outcome)
+		text := "⚠️ " + string(r.Body)
+		switch {
+		case contextFull(string(r.Body)) && b.shows(th, id):
+			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
+			b.advance(th, id, r.N)
+			b.continueFull(th, id, r.N)
+		case r.Via != "": // a stop: on purpose, so no Retry to offer
+			b.say(th, msg{Text: text})
+		default:
+			ms, err := b.modelList(id)
+			if err != nil {
+				log.Printf("models: %v", err)
+			}
+			b.say(th, msg{Text: text, Session: id, Retry: true, Models: ms})
+		}
+	case statefile.Call:
+		t.calls++
+		t.stepCalls++
+		t.last = append(t.last, callLine(r.Body))[max(0, len(t.last)-2):]
+		t.dirty = true
+	}
 }
 
 // turn is what a follower shows of the agent's work since a person last
 // spoke: one status message, edited as calls come, and then the reply.
 type turn struct {
 	start     time.Time
-	key       string   // the Discord message the reply answers, if any
-	asked     []string // the Discord messages of the turn, to mark done
+	key       string   // the chat message the reply answers, if any
+	asked     []string // the chat messages of the turn, to mark done
 	calls     int      // tool calls so far
 	stepCalls int      // calls of the step not yet closed
 	last      []string // the newest call lines
 	text      []string // text of the step not yet closed
 	status    string   // the status message, once posted
 	dirty     bool     // calls the status message does not show yet
-}
+	shown     time.Time
 
-// showStatus posts or edits the turn's status message: when it started, in a
-// timestamp Discord keeps live, the calls, and a Stop button.
-func (b *bridge) showStatus(thread, id string, t *turn) {
-	content := fmt.Sprintf("**working** · started <t:%d:R> · %s", t.start.Unix(), calls(t.calls))
-	for _, l := range t.last {
-		content += "\n-# " + l
-	}
-	comps := []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
-		discordgo.Button{Label: "Stop", Style: discordgo.SecondaryButton, CustomID: "stop:" + id},
-	}}}
-	t.dirty = false
-	if t.status == "" {
-		m, err := b.dc.ChannelMessageSendComplex(thread, &discordgo.MessageSend{
-			Content: content, Components: comps,
-			AllowedMentions: &discordgo.MessageAllowedMentions{}, Flags: discordgo.MessageFlagsSuppressEmbeds,
-		})
-		if err != nil {
-			log.Printf("status %s: %v", id, err)
-			return
-		}
-		t.status = m.ID
-		return
-	}
-	if _, err := b.dc.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: t.status, Channel: thread, Content: &content, Components: &comps}); err != nil {
-		log.Printf("status %s: %v", id, err)
-	}
+	// Set when the turn is done, for its last status.
+	done    bool
+	outcome string // "", "failed" or "stopped"
+	took    time.Duration
+	used    int // percent of the context used, or -1
 }
 
 // finish ends the turn: the status message shrinks to one line, and the
 // waiting text goes out as a reply to the message that began the turn. A
 // reply after a long turn notifies its author. outcome is "", "failed" or
 // "stopped".
-func (b *bridge) finish(thread, id string, t *turn, outcome string) {
+func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	took := time.Since(t.start).Round(time.Second)
 	if t.status != "" {
-		line := fmt.Sprintf("-# %s · %s", calls(t.calls), took)
-		if outcome != "" {
-			line = fmt.Sprintf("-# %s after %s · %s", outcome, calls(t.calls), took)
-		} else if i, err := b.info(id); err == nil && i.Config.ContextLimit > 0 {
-			line += fmt.Sprintf(" · %d%% context", i.ContextUsed*100/i.Config.ContextLimit)
+		t.done, t.outcome, t.took, t.used = true, outcome, took, -1
+		if i, err := b.info(id); outcome == "" && err == nil && i.Config.ContextLimit > 0 {
+			t.used = i.ContextUsed * 100 / i.Config.ContextLimit
 		}
-		none := []discordgo.MessageComponent{}
-		if _, err := b.dc.ChannelMessageEditComplex(&discordgo.MessageEdit{ID: t.status, Channel: thread, Content: &line, Components: &none}); err != nil {
-			log.Printf("status %s: %v", id, err)
-		}
+		b.chat(th).status(th, id, t)
 	}
 	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	*t = turn{}
@@ -911,103 +820,77 @@ func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 		result = failed
 	}
 	for _, m := range asked {
-		b.mark(thread, m, result)
+		b.chat(th).react(th, m, result)
 	}
-	if text == "" {
-		return
+	if text != "" {
+		b.reply(th, text, key, took > 2*time.Minute)
 	}
-	long := took > 2*time.Minute
-	mentions := &discordgo.MessageAllowedMentions{RepliedUser: long}
-	var ref *discordgo.MessageReference
-	switch {
-	case key != "" && key != thread:
-		ref = &discordgo.MessageReference{MessageID: key, ChannelID: thread}
-	case key == thread && long:
-		// A thread's id is its starter message's, which is in the parent
-		// channel, and Discord refuses a reply across channels: mention.
-		if th, err := b.dc.Channel(thread); err == nil {
-			if m, err := b.dc.ChannelMessage(th.ParentID, key); err == nil {
-				text = m.Author.Mention() + " " + text
-				mentions.Users = []string{m.Author.ID}
-			}
-		}
-	}
-	b.send(thread, text, ref, mentions)
 }
 
-// send posts the agent's text in Discord-sized pieces, the first a reply to
-// ref. A line "attach: /path" uploads that file from this machine with the
-// last piece, in place of the line.
-func (b *bridge) send(thread, text string, ref *discordgo.MessageReference, mentions *discordgo.MessageAllowedMentions) {
-	var lines []string
-	var files []*discordgo.File
+// reply posts the agent's text. A line "attach: /path" sends that file from
+// this machine with it, in place of the line.
+func (b *bridge) reply(th, text, replyTo string, notify bool) {
+	var lines, notes []string
+	var files []file
 	for _, l := range strings.Split(text, "\n") {
 		path, ok := strings.CutPrefix(strings.TrimSpace(l), "attach: ")
 		if !ok {
 			lines = append(lines, l)
 			continue
 		}
-		data, err := os.ReadFile(strings.TrimSpace(path))
-		if err == nil && len(data) > 10<<20 {
-			err = errors.New("over Discord's 10 MiB")
+		path = strings.TrimSpace(path)
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > maxAttach {
+			err = fmt.Errorf("%s is over %d MiB", path, maxAttach>>20)
 		}
 		if err != nil {
-			lines = append(lines, "-# could not attach: "+err.Error())
+			notes = append(notes, "could not attach: "+err.Error())
 			continue
 		}
-		files = append(files, &discordgo.File{Name: filepath.Base(path), Reader: bytes.NewReader(data)})
+		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }})
 	}
-	parts := split(strings.TrimSpace(strings.Join(lines, "\n")), 1900)
-	if len(parts) == 0 && len(files) > 0 {
-		parts = []string{""}
+	text = strings.TrimSpace(strings.Join(lines, "\n"))
+	if text == "" && len(notes) == 0 && len(files) == 0 {
+		return
 	}
-	for i, part := range parts {
-		msg := &discordgo.MessageSend{Content: part, AllowedMentions: mentions, Flags: discordgo.MessageFlagsSuppressEmbeds}
-		if i == 0 {
-			msg.Reference = ref
-		}
-		if i == len(parts)-1 {
-			msg.Files = files
-		}
-		if _, err := b.dc.ChannelMessageSendComplex(thread, msg); err != nil {
-			log.Printf("discord send: %v", err)
-		}
-	}
+	b.say(th, msg{Text: text, Note: strings.Join(notes, "\n"), ReplyTo: replyTo, Notify: notify, Files: files})
 }
 
 // The bot's reaction on a message the session was sent: seen while the
-// agent works on it, then done or failed. The start messages in a channel
-// show at a glance how each session's last turn went.
+// agent works on it, then done or failed.
 const (
 	seen   = "👀"
 	done   = "✅"
 	failed = "❌"
 )
 
-// mark sets the bot's reaction on Discord message msgID, sent in the thread,
-// or in its parent channel when it is the thread's starter, whose id the
-// thread has. Any other reaction leaves seen's place.
-func (b *bridge) mark(thread, msgID, emoji string) {
-	if !snowflake(msgID) {
+type title struct{ id, name string }
+
+// rename gives thread th session id's name, in a goroutine of its own: a
+// platform's rename limit (Discord's is about two per ten minutes) then holds
+// back the rename only, and a rename that waits takes the newest name.
+func (b *bridge) rename(th, id, name string) {
+	b.mu.Lock()
+	_, running := b.renames[th]
+	b.renames[th] = &title{id, name}
+	b.mu.Unlock()
+	if running {
 		return
 	}
-	ch := thread
-	if msgID == thread {
-		th, err := b.dc.State.Channel(thread)
-		if err != nil {
-			if th, err = b.dc.Channel(thread); err != nil {
-				log.Printf("mark %s: %v", msgID, err)
+	go func() {
+		for {
+			b.mu.Lock()
+			t := b.renames[th]
+			if t == nil {
+				delete(b.renames, th)
+				b.mu.Unlock()
 				return
 			}
+			b.renames[th] = nil
+			b.mu.Unlock()
+			b.chat(th).rename(th, t.id, t.name)
 		}
-		ch = th.ParentID
-	}
-	if emoji != seen {
-		_ = b.dc.MessageReactionRemove(ch, msgID, seen, "@me")
-	}
-	if err := b.dc.MessageReactionAdd(ch, msgID, emoji); err != nil {
-		log.Printf("mark %s: %v", msgID, err)
-	}
+	}()
 }
 
 // jobLine is the first line of a job's report without its ids and log path:
@@ -1030,74 +913,56 @@ func calls(n int) string {
 	return fmt.Sprintf("%d calls", n)
 }
 
-// snowflake is whether s is a Discord id, as a message's idempotency key is
-// when the bot posted it for a Discord message.
-func snowflake(s string) bool {
-	return s != "" && strings.Trim(s, "0123456789") == ""
-}
-
-// onInteraction runs a button or select as the thread command it names:
-// "stop:<id>" is !stop on session id, and "model:<id>" picking m is
-// !model m. The message the component is on stands for the person's.
-func (b *bridge) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
-	if i.Type != discordgo.InteractionMessageComponent {
-		return
-	}
-	data := i.MessageComponentData()
-	action, id, _ := strings.Cut(data.CustomID, ":")
-	for _, v := range data.Values {
-		action += " " + v
-	}
-	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
-		log.Printf("interaction: %v", err)
-	}
-	th, err := s.State.Channel(i.ChannelID)
-	if err != nil {
-		if th, err = s.Channel(i.ChannelID); err != nil {
-			return
-		}
-	}
-	b.command(th, id, i.Message.ID, "!"+action)
-}
-
-func (b *bridge) shows(thread, id string) bool {
+func (b *bridge) shows(th, id string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.st.Threads[thread] == id
+	return b.st.Threads[th].Session == id
 }
 
-// sessionFor is the session a thread shows: the one it was last moved to,
-// else the one its name starts with.
-func (b *bridge) sessionFor(th *discordgo.Channel) string {
-	b.mu.Lock()
-	id, ok := b.st.Threads[th.ID]
-	b.mu.Unlock()
-	if ok {
-		return id
-	}
-	return sessionOf(th.Name)
-}
-
-// relayedFrom is the record to follow a session after: the last relayed,
-// else its newest.
-func (b *bridge) relayedFrom(id string) (int, bool) {
-	b.mu.Lock()
-	n, ok := b.st.Relayed[id]
-	b.mu.Unlock()
-	if ok {
-		return n, true
-	}
-	i, err := b.info(id)
-	return i.N, err == nil
-}
-
-func (b *bridge) relayed(id string, n int) {
+// sessionFor is the session the state says a thread shows, or "".
+func (b *bridge) sessionFor(th string) string {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if n > b.st.Relayed[id] {
-		b.st.Relayed[id] = n
+	return b.st.Threads[th].Session
+}
+
+// bind makes thread th show session id, relayed up to record n; a thread
+// that shows it already keeps its newer n.
+func (b *bridge) bind(th, id string, n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t := b.st.Threads[th]; t.Session != id || n > t.N {
+		b.st.Threads[th] = thread{id, n}
 		b.save()
 	}
+}
+
+// advance records that session id is relayed up to record n, if th still
+// shows it.
+func (b *bridge) advance(th, id string, n int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if t := b.st.Threads[th]; t.Session == id && n > t.N {
+		b.st.Threads[th] = thread{id, n}
+		b.save()
+	}
+}
+
+// forget drops a thread whose session is gone.
+func (b *bridge) forget(th string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.st.Threads, th)
+	delete(b.st.Seen, th)
+	b.save()
+}
+
+// lastSeen is the newest message handled in channel ch, if any was.
+func (b *bridge) lastSeen(ch string) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	id, ok := b.st.Seen[ch]
+	return id, ok
 }
 
 // fresh reports whether message id is newer than every one handled in
@@ -1113,7 +978,7 @@ func (b *bridge) fresh(ch, id string) bool {
 	return true
 }
 
-// newer compares Discord ids, which grow with time.
+// newer compares message ids, which grow with time.
 func newer(a, b string) bool {
 	if len(a) != len(b) {
 		return len(a) > len(b)
@@ -1127,7 +992,7 @@ func statePath() string {
 		home, _ := os.UserHomeDir()
 		dir = filepath.Join(home, ".local", "state")
 	}
-	return filepath.Join(dir, "mainplane-discord", "state.json")
+	return filepath.Join(dir, "mainplane-chat", "state.json")
 }
 
 func (b *bridge) load() {
@@ -1136,16 +1001,13 @@ func (b *bridge) load() {
 		err = json.Unmarshal(data, &b.st)
 	}
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
-		log.Printf("state: %v", err)
+		log.Fatalf("state: %v", err)
 	}
 	if b.st.Seen == nil {
 		b.st.Seen = map[string]string{}
 	}
-	if b.st.Relayed == nil {
-		b.st.Relayed = map[string]int{}
-	}
 	if b.st.Threads == nil {
-		b.st.Threads = map[string]string{}
+		b.st.Threads = map[string]thread{}
 	}
 	if b.st.MirrorSince.IsZero() {
 		b.st.MirrorSince = time.Now().UTC()
@@ -1186,7 +1048,7 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 && resp.StatusCode < 500 {
 		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 200))
-		return nil, &refusedError{resp.StatusCode, resp.Status + ": " + strings.TrimSpace(string(msg))}
+		return nil, &refusedError{resp.Status + ": " + strings.TrimSpace(string(msg))}
 	}
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("%s", resp.Status)
@@ -1206,18 +1068,14 @@ func (b *bridge) records(id string, after int, wait string) ([]statefile.Record,
 }
 
 // refusedError is a 4xx from the harness, which a retry does not mend.
-type refusedError struct {
-	code int
-	msg  string
-}
+type refusedError struct{ msg string }
 
 func (e *refusedError) Error() string { return e.msg }
 
 // gone is whether the session no longer exists, as after a delete, rather
-// than the call being refused for another reason, such as a revoked key.
-func (e *refusedError) gone() bool {
-	return e.code == http.StatusNotFound || strings.Contains(e.msg, "no such file")
-}
+// than the call being refused for another reason, such as a revoked key. The
+// harness answers every error with 400, so only its text tells.
+func (e *refusedError) gone() bool { return strings.Contains(e.msg, "no such file") }
 
 func (b *bridge) info(id string) (info, error) {
 	var i info
@@ -1252,34 +1110,6 @@ func (b *bridge) do(req *http.Request, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// say sends text in Discord-sized pieces, with mentions and link previews off.
-func (b *bridge) say(channel, text string, comps ...discordgo.MessageComponent) {
-	parts := split(text, 1900)
-	for i, part := range parts {
-		msg := &discordgo.MessageSend{
-			Content:         part,
-			AllowedMentions: &discordgo.MessageAllowedMentions{},
-			Flags:           discordgo.MessageFlagsSuppressEmbeds,
-		}
-		if i == len(parts)-1 {
-			msg.Components = comps
-		}
-		_, err := b.dc.ChannelMessageSendComplex(channel, msg)
-		if err != nil {
-			log.Printf("discord send: %v", err)
-		}
-	}
-}
-
-// sessionOf is the session id a thread name starts with, or "".
-func sessionOf(name string) string {
-	id, _, _ := strings.Cut(name, " ")
-	if statefile.ValidID(id) {
-		return id
-	}
-	return ""
-}
-
 // callLine is one line saying what tool runs where, e.g. "run on admin: ls".
 func callLine(body []byte) string {
 	var c struct {
@@ -1303,16 +1133,27 @@ func callLine(body []byte) string {
 	return line
 }
 
+// firstWords is s on one line, cut to at most max bytes and a whole rune.
 func firstWords(s string, max int) string {
 	s = strings.Join(strings.Fields(s), " ")
 	if len(s) <= max {
 		return s
 	}
-	return strings.TrimSpace(s[:max]) + "…"
+	return strings.TrimSpace(s[:runeStart(s, max)]) + "…"
 }
 
-// split cuts text into pieces of at most max bytes at line breaks where it can,
-// closing and reopening a code fence that a cut falls inside.
+// runeStart is i, or the start of the rune byte i of s is in, so that s[:i]
+// cuts no rune in two.
+func runeStart(s string, i int) int {
+	for i > 0 && !utf8.RuneStart(s[i]) {
+		i--
+	}
+	return i
+}
+
+// split cuts text into pieces of at most max bytes at line breaks where it
+// can, else at a rune's start, closing and reopening a code fence that a cut
+// falls inside.
 func split(text string, max int) []string {
 	var parts []string
 	fence := false
@@ -1323,7 +1164,7 @@ func split(text string, max int) []string {
 		}
 		cut := strings.LastIndex(text[:max], "\n")
 		if cut <= 0 {
-			cut = max
+			cut = runeStart(text, max)
 		}
 		part := text[:cut]
 		text = strings.TrimPrefix(text[cut:], "\n")

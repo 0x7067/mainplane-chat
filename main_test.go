@@ -3,7 +3,7 @@ package main
 import (
 	"strings"
 	"testing"
-	"time"
+	"unicode/utf8"
 
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
@@ -84,20 +84,6 @@ func TestLastUnanswered(t *testing.T) {
 	}
 }
 
-func TestMirrored(t *testing.T) {
-	since := time.Date(2026, 11, 1, 15, 0, 0, 0, time.UTC)
-	after, before := since.Add(time.Minute), since.Add(-time.Minute)
-	for _, c := range []struct {
-		from    string
-		created time.Time
-		want    bool
-	}{{"cli", after, true}, {"tui", after, true}, {"discord", after, false}, {"cli", before, false}} {
-		if got := mirrored(c.from, c.created, since); got != c.want {
-			t.Errorf("mirrored(%q, %v) = %v", c.from, c.created, got)
-		}
-	}
-}
-
 func TestQuote(t *testing.T) {
 	for _, c := range []struct{ via, body, want string }{
 		{"cli", "fix the build", "> **cli:** fix the build"},
@@ -114,9 +100,9 @@ func TestGone(t *testing.T) {
 		err  refusedError
 		want bool
 	}{
-		{refusedError{400, "400 Bad Request: open /var/lib/mainplane-server/sessions/x.state: no such file or directory"}, true},
-		{refusedError{404, "404 Not Found"}, true},
-		{refusedError{401, "401 Unauthorized"}, false},
+		{refusedError{"400 Bad Request: open /var/lib/mainplane-server/sessions/x.state: no such file or directory"}, true},
+		{refusedError{"400 Bad Request: session not found"}, false},
+		{refusedError{"401 Unauthorized"}, false},
 	} {
 		if got := c.err.gone(); got != c.want {
 			t.Errorf("gone(%q) = %v", c.err.msg, got)
@@ -143,5 +129,20 @@ func TestJobLine(t *testing.T) {
 	got := jobLine("[job toolu_01X on admin exited 0 after 40s. Log: /home/u/.mainplane/jobs/toolu_01X.log]\nlots\nof log")
 	if want := "job on admin exited 0 after 40s"; got != want {
 		t.Errorf("jobLine = %q, want %q", got, want)
+	}
+}
+
+func TestRunes(t *testing.T) {
+	s := strings.Repeat("é", 10) // 2 bytes each
+	if got := firstWords(s, 5); got != "éé…" {
+		t.Errorf("firstWords = %q", got)
+	}
+	for _, p := range split(s, 5) {
+		if !utf8.ValidString(p) || len(p) > 5 {
+			t.Errorf("split piece %q", p)
+		}
+	}
+	if got := strings.Join(split(s, 5), ""); got != s {
+		t.Errorf("split lost text: %q", got)
 	}
 }
