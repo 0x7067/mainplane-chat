@@ -47,7 +47,7 @@ const (
 )
 
 // maxAttach is the largest file an agent's "attach: /path" sends: Discord's
-// upload limit.
+// upload limit, which is below Slack's.
 const maxAttach = 20 << 20
 
 type bridge struct {
