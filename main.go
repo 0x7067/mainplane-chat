@@ -772,7 +772,7 @@ func (b *bridge) follow(thread, id string, n int) {
 					t.text = append(t.text, string(r.Body))
 				case statefile.Step:
 					if t.stepCalls > 0 {
-						b.say(thread, strings.Join(t.text, "\n\n"))
+						b.send(thread, strings.Join(t.text, "\n\n"), nil, &discordgo.MessageAllowedMentions{})
 						t.text, t.stepCalls = nil, 0
 					} else {
 						b.finish(thread, id, &t, "")
@@ -928,10 +928,42 @@ func (b *bridge) finish(thread, id string, t *turn, outcome string) {
 			}
 		}
 	}
-	for i, part := range split(text, 1900) {
+	b.send(thread, text, ref, mentions)
+}
+
+// send posts the agent's text in Discord-sized pieces, the first a reply to
+// ref. A line "attach: /path" uploads that file from this machine with the
+// last piece, in place of the line.
+func (b *bridge) send(thread, text string, ref *discordgo.MessageReference, mentions *discordgo.MessageAllowedMentions) {
+	var lines []string
+	var files []*discordgo.File
+	for _, l := range strings.Split(text, "\n") {
+		path, ok := strings.CutPrefix(strings.TrimSpace(l), "attach: ")
+		if !ok {
+			lines = append(lines, l)
+			continue
+		}
+		data, err := os.ReadFile(strings.TrimSpace(path))
+		if err == nil && len(data) > 10<<20 {
+			err = errors.New("over Discord's 10 MiB")
+		}
+		if err != nil {
+			lines = append(lines, "-# could not attach: "+err.Error())
+			continue
+		}
+		files = append(files, &discordgo.File{Name: filepath.Base(path), Reader: bytes.NewReader(data)})
+	}
+	parts := split(strings.TrimSpace(strings.Join(lines, "\n")), 1900)
+	if len(parts) == 0 && len(files) > 0 {
+		parts = []string{""}
+	}
+	for i, part := range parts {
 		msg := &discordgo.MessageSend{Content: part, AllowedMentions: mentions, Flags: discordgo.MessageFlagsSuppressEmbeds}
 		if i == 0 {
 			msg.Reference = ref
+		}
+		if i == len(parts)-1 {
+			msg.Files = files
 		}
 		if _, err := b.dc.ChannelMessageSendComplex(thread, msg); err != nil {
 			log.Printf("discord send: %v", err)
