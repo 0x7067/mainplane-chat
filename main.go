@@ -255,7 +255,11 @@ func (b *bridge) start(m *discordgo.Message, text string) {
 		b.say(m.ChannelID, "could not start a session: "+err.Error())
 		return
 	}
-	name := id + " " + firstWords(cmp.Or(text, m.Attachments[0].Filename), 80)
+	label := text
+	if label == "" {
+		label = m.Attachments[0].Filename // a message with only files
+	}
+	name := id + " " + firstWords(label, 80)
 	th, err := b.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: name, AutoArchiveDuration: 10080})
 	if err != nil {
 		b.say(m.ChannelID, "session "+id+" started, but the thread failed: "+err.Error())
