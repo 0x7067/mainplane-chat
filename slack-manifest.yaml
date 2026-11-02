@@ -17,6 +17,7 @@ oauth_config:
       - chat:write
       - im:history
       - files:read
+      - files:write
       - reactions:write
 settings:
   socket_mode_enabled: true

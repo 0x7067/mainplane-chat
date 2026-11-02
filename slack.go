@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"cmp"
 	"errors"
 	"fmt"
 	"html"
@@ -30,13 +32,14 @@ type slackChat struct {
 	sm    *socketmode.Client
 	users map[string]bool // the Slack users the bot takes messages from
 	self  string          // the bot's own Slack user
+	work  chan func()     // the events' work, done in order by one goroutine
 
 	mu         sync.Mutex
 	processing map[string]time.Time // thread -> when Slack was last told it is processing
 }
 
 func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
-	s := &slackChat{b: b, users: map[string]bool{}, processing: map[string]time.Time{}}
+	s := &slackChat{b: b, users: map[string]bool{}, work: make(chan func(), 256), processing: map[string]time.Time{}}
 	for _, u := range strings.Split(users, ",") {
 		s.users[strings.TrimSpace(u)] = true
 	}
@@ -64,17 +67,24 @@ func (s *slackChat) open() {
 	for th, id := range threads {
 		s.b.resume(th, id)
 	}
+	go func() {
+		for f := range s.work {
+			f()
+		}
+	}()
 	go s.run()
 	go func() { log.Fatalf("slack: %v", s.sm.Run()) }()
 }
 
-// run handles Slack's events one at a time, in order.
+// run acks Slack's events at once, within Slack's 3 seconds, and queues
+// their work, which is done one at a time, in order: catching up on connect
+// finishes before the next message is handled.
 func (s *slackChat) run() {
 	for evt := range s.sm.Events {
 		switch evt.Type {
 		case socketmode.EventTypeConnected:
 			log.Print("slack connected")
-			s.catchUp()
+			s.work <- s.catchUp
 		case socketmode.EventTypeConnectionError:
 			log.Printf("slack: %v", evt.Data)
 		case socketmode.EventTypeEventsAPI:
@@ -85,13 +95,36 @@ func (s *slackChat) run() {
 			}
 			switch ev := e.InnerEvent.Data.(type) {
 			case *slackevents.MessageEvent:
-				s.handle(ev)
+				s.work <- func() { s.handle(ev) }
 			case *slackevents.AgentSessionStoppedEvent:
-				s.stopped(ev)
+				s.work <- func() { s.stopped(ev) }
 			case *slackevents.AgentSessionTitleChangedEvent:
-				s.renamed(ev)
+				s.work <- func() { s.renamed(ev) }
+			}
+		case socketmode.EventTypeInteractive:
+			s.sm.Ack(*evt.Request)
+			if cb, ok := evt.Data.(slack.InteractionCallback); ok && cb.Type == slack.InteractionTypeBlockActions {
+				s.work <- func() { s.act(cb) }
 			}
 		}
+	}
+}
+
+// act runs a Retry button or model picker as the thread command it is: the
+// actions block's id is the session, so "retry" is !retry on it and "model"
+// picking m is !model m. The message the control is on stands for the
+// person's.
+func (s *slackChat) act(cb slack.InteractionCallback) {
+	if !s.users[cb.User.ID] {
+		return
+	}
+	th := s.thread(cb.Container.ChannelID, cb.Container.ThreadTs)
+	for _, a := range cb.ActionCallback.BlockActions {
+		text := "!" + a.ActionID
+		if a.ActionID == "model" {
+			text += " " + a.SelectedOption.Value
+		}
+		s.b.command(th, a.BlockID, cb.Container.MessageTs, text)
 	}
 }
 
@@ -119,27 +152,54 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		return
 	}
 	text := plain(m.Text)
-	if text == "" {
+	var files []file
+	if m.Message != nil {
+		files = s.files(m.Message.Files)
+	}
+	if text == "" && len(files) == 0 {
 		return
 	}
 	if m.ThreadTimeStamp == "" || m.ThreadTimeStamp == m.TimeStamp {
 		th := s.thread(m.Channel, m.TimeStamp)
-		// The thread is the message's; the agent session's title is its first words.
+		// The thread is the message's; the agent session's title is its first
+		// words, or its first file's name.
+		label := text
+		if label == "" {
+			label = files[0].name // a message with only files
+		}
+		title := firstWords(label, 80)
 		open := func(string) (string, error) {
-			if _, err := s.sl.SetAgentSessionStatus(slack.AgentSessionSetStatusParameters{Status: "processing", ChannelID: m.Channel, ThreadTS: m.TimeStamp, Title: firstWords(text, 80)}); err != nil {
+			if _, err := s.sl.SetAgentSessionStatus(slack.AgentSessionSetStatusParameters{Status: "processing", ChannelID: m.Channel, ThreadTS: m.TimeStamp, Title: title}); err != nil {
 				log.Printf("session status %s: %v", th, err)
 			}
 			return th, nil
 		}
-		if err := s.b.start("slack", open, m.TimeStamp, text, nil); err != nil {
+		if err := s.b.start("slack", open, m.TimeStamp, text, files); err != nil {
 			s.say(th, msg{Text: err.Error()})
 		}
 		return
 	}
 	th := s.thread(m.Channel, m.ThreadTimeStamp)
 	if id := s.b.sessionFor(th); id != "" {
-		s.b.message(th, id, m.TimeStamp, text, nil)
+		s.b.message(th, id, m.TimeStamp, text, files)
 	}
+}
+
+// files are a message's files, downloaded with the bot token when needed. A
+// remote file (mode external) lives outside Slack: the token never goes there.
+func (s *slackChat) files(fs []slack.File) []file {
+	var out []file
+	for _, f := range fs {
+		out = append(out, file{name: f.Name, ctype: f.Mimetype, size: f.Size, fetch: func() ([]byte, error) {
+			if f.Mode == "external" || f.URLPrivateDownload == "" {
+				return nil, errors.New("not a file uploaded to Slack")
+			}
+			var buf bytes.Buffer
+			err := s.sl.GetFile(f.URLPrivateDownload, &buf)
+			return buf.Bytes(), err
+		}})
+	}
+	return out
 }
 
 // catchUp handles the messages sent while the bot was down, in the DMs it
@@ -177,7 +237,7 @@ func (s *slackChat) catchUp() {
 		for _, m := range missed {
 			s.handle(&slackevents.MessageEvent{
 				Channel: ch, ChannelType: "im", User: m.User, Text: m.Text, SubType: m.SubType,
-				TimeStamp: m.Timestamp, ThreadTimeStamp: m.ThreadTimestamp,
+				TimeStamp: m.Timestamp, ThreadTimeStamp: m.ThreadTimestamp, Message: &m.Msg,
 			})
 		}
 	}
@@ -260,23 +320,71 @@ func (s *slackChat) renamed(ev *slackevents.AgentSessionTitleChangedEvent) {
 }
 
 // say sends m to the thread: its text as Markdown, in pieces within a
-// markdown block's limit, and its note small. A failure that offers Retry
-// suspends the agent session, as it waits for the user.
+// markdown block's limit, its files, then its note small, with its Retry
+// button and model picker. A failure that offers Retry suspends the agent
+// session, as it waits for the user.
 func (s *slackChat) say(th string, m msg) {
 	channel, ts := threadParts(th)
 	for _, part := range split(strings.TrimSpace(m.Text), 11000) {
 		s.post(channel, ts, firstWords(part, 300), slack.NewMarkdownBlock("", part))
 	}
-	if m.Note != "" {
-		s.post(channel, ts, firstWords(m.Note, 300), slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, m.Note, false, false)))
+	note := m.Note
+	for _, f := range m.Files {
+		data, err := f.fetch()
+		if err == nil {
+			_, err = s.sl.UploadFile(slack.UploadFileParameters{Reader: bytes.NewReader(data), FileSize: len(data), Filename: f.name, Channel: channel, ThreadTimestamp: ts})
+		}
+		if err != nil {
+			note = strings.TrimSpace(note + "\ncould not attach " + f.name + ": " + err.Error())
+		}
+	}
+	var blocks []slack.Block
+	if note != "" {
+		blocks = append(blocks, slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, note, false, false)))
+	}
+	if c := slackControls(m); c != nil {
+		blocks = append(blocks, c)
+	}
+	if len(blocks) > 0 {
+		s.post(channel, ts, firstWords(cmp.Or(note, "Retry or continue on another model"), 300), blocks...)
 	}
 	if m.Retry {
 		s.setStatus(th, "suspended")
 	}
 }
 
-func (s *slackChat) post(channel, ts, fallback string, block slack.Block) {
-	if _, _, err := s.sl.PostMessage(channel, slack.MsgOptionTS(ts), slack.MsgOptionText(fallback, false), slack.MsgOptionBlocks(block)); err != nil {
+// slackControls is m's Retry button and model picker, in an actions block
+// whose id is the session they act on, or nil. A select shows at most 100
+// options of at most 75 characters.
+func slackControls(m msg) slack.Block {
+	var els []slack.BlockElement
+	if m.Retry {
+		els = append(els, slack.NewButtonBlockElement("retry", "retry", slack.NewTextBlockObject(slack.PlainTextType, "Retry", false, false)).WithStyle(slack.StylePrimary))
+	}
+	var opts []*slack.OptionBlockObject
+	var current *slack.OptionBlockObject
+	for _, o := range m.Models[:min(len(m.Models), 100)] {
+		opt := slack.NewOptionBlockObject(o.ID, slack.NewTextBlockObject(slack.PlainTextType, firstWords(o.Name, 70), false, false), slack.NewTextBlockObject(slack.PlainTextType, firstWords(o.ID, 70), false, false))
+		opts = append(opts, opt)
+		if o.Current {
+			current = opt
+		}
+	}
+	if len(opts) > 0 {
+		sel := slack.NewOptionsSelectBlockElement(slack.OptTypeStatic, slack.NewTextBlockObject(slack.PlainTextType, "Continue on another model", false, false), "model", opts...)
+		if current != nil {
+			sel.WithInitialOption(current)
+		}
+		els = append(els, sel)
+	}
+	if len(els) == 0 {
+		return nil
+	}
+	return slack.NewActionBlock(m.Session, els...)
+}
+
+func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) {
+	if _, _, err := s.sl.PostMessage(channel, slack.MsgOptionTS(ts), slack.MsgOptionText(fallback, false), slack.MsgOptionBlocks(blocks...)); err != nil {
 		log.Printf("slack send: %v", err)
 	}
 }

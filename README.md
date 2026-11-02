@@ -23,7 +23,7 @@ Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a priva
 
 - A top-level DM message to the app starts a session in its thread, which is a Slack agent session: Slack shows its title (the first words, then the session's name), its working state and a Stop button, which stops the session. A title changed in Slack names the session.
 - Replies in the thread continue the session, and the agent's replies come back there. Only users in `MAINPLANE_SLACK_USERS` are heard. A reply also sent to the DM counts.
-- The status message, quoted messages from elsewhere, job lines, auto-continue and following continuations work as in Discord. The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends; while the agent works, Slack's own status shows it. A failed step marks the agent session suspended.
+- The status message, quoted messages from elsewhere, job lines, files in, `attach:` out, the Retry button and model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched. The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends; while the agent works, Slack's own status shows it. A failed step marks the agent session suspended.
 - Thread commands use `!` (`!model`, `!continue`, `!retry`, `!stop`, `!info`): Slack takes `/` for its own slash commands.
 - The app's manifest is `slack-manifest.yaml`.
 
