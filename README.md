@@ -1,6 +1,8 @@
 # mainplane-chat
 
-Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a private Discord server.
+Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a private Discord server and from Slack DMs, in one process, so each session has one follower.
+
+## Discord
 
 - A message in any channel starts a session in a new thread named `<session id> <first words>`. Its model is picked as the mainplane terminal app picks it (the newest session's, else the catalog's default, if its provider is connected); its workers are every connected worker.
 - A session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`, from when mirroring began, as Mainplane syncs sessions across every connector. Create a text channel named `sessions`; the bot finds it by name.
@@ -16,6 +18,18 @@ Drive [Mainplane](https://github.com/mainplane-ai/mainplane) agents from a priva
   - `/retry` steps a failed session again; `/stop` stops the running step; `/info` shows status, model, workers and context.
 - When a thread's session ends at its context limit (`context N exceeds limit M`), the bot runs `/continue` itself, as Mainplane intends a full session to go on, and passes on the last message the full session did not answer. Continuations chain until the task is done.
 - A thread follows a continuation made anywhere: `/model` or `/continue` in the terminal app on a thread's session moves the thread to the new session too. Mainplane has no event for new sessions, so the bot checks the newest ones every 3 seconds, as the terminal app does.
+
+## Slack
+
+- A top-level DM message to the app starts a session in its thread, which is a Slack agent session: Slack shows its title (the first words, then the session's name), its working state and a Stop button, which stops the session. A title changed in Slack names the session.
+- Replies in the thread continue the session, and the agent's replies come back there. Only users in `MAINPLANE_SLACK_USERS` are heard. A reply also sent to the DM counts.
+- The status message, quoted messages from elsewhere, job lines, auto-continue and following continuations work as in Discord. The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends; while the agent works, Slack's own status shows it. A failed step marks the agent session suspended.
+- Thread commands use `!` (`!model`, `!continue`, `!retry`, `!stop`, `!info`): Slack takes `/` for its own slash commands.
+- The app's manifest is `slack-manifest.yaml`.
+
+## Both
+
+- Sessions made in Slack stay in Slack: `#sessions` mirrors only sessions made outside the chats.
 - What happens while the bot is down is picked up when it starts: agent replies it missed, and messages sent in channels and threads it has seen before. Its state is in `$XDG_STATE_HOME/mainplane-chat/state.json` (`~/.local/state` by default).
 
 Runs on the harness machine. Environment:
@@ -23,6 +37,9 @@ Runs on the harness machine. Environment:
 | Variable | |
 | --- | --- |
 | `DISCORD_TOKEN` | bot token; the bot needs the Message Content intent |
+| `SLACK_BOT_TOKEN` | `xoxb-` token of the Slack app |
+| `SLACK_APP_TOKEN` | `xapp-` app-level token with `connections:write`, for Socket Mode |
+| `MAINPLANE_SLACK_USERS` | comma-separated Slack user ids the bot takes messages from |
 | `MAINPLANE_KEY` | harness api key (`mainplane-server key new chat`) |
 | `MAINPLANE_URL` | default `http://127.0.0.1:8080` |
 | `MAINPLANE_DISCORD_TESTER` | optional: the user id of a tester bot whose messages the bot handles as a person's, for end-to-end tests (`.agents/skills/verify-mainplane-discord`). Other bots stay ignored |

@@ -283,6 +283,9 @@ func controls(m msg) []discordgo.MessageComponent {
 // shrinks to one line. Each update sends typing, which shows for 10 seconds.
 func (d *discord) status(th, id string, t *turn) {
 	ch := d.id(th)
+	if t.done && t.status == "" {
+		return
+	}
 	if t.done {
 		line := fmt.Sprintf("-# %s · %s", calls(t.calls), t.took)
 		if t.outcome != "" {
