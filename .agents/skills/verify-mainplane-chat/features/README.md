@@ -6,7 +6,7 @@ The user-facing behavior of the mainplane-chat bot, one file per feature. Read t
 
 - The build under test is running: `scripts/doctor.sh` passes from the checkout it was built from.
 - The tester bot is in the guild, `~/.config/mainplane-chat/tester.env` holds its token, and the bot's env sets `MAINPLANE_DISCORD_TESTER` to its user id.
-- `#bot-test` exists in the Mainplane guild. Every test message goes there or in threads under it.
+- `#bot-test` exists in the test guild. Every test message goes there or in threads under it.
 - At least one provider is connected (`mainplane providers` on the server).
 
 ## Driving conventions

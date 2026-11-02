@@ -13,9 +13,9 @@ While the agent works on a turn, the thread shows one status message, edited in 
 
 ## Driving it with say.sh
 
-- **Status.** In a thread, send `run "sleep 20; echo hi" on admin twice, then reply with the word done`. While it runs, `scripts/discord.sh "/channels/<thread id>/messages?limit=3" | jq '.[] | {content, components}'` shows the status with the Stop button, edited (`edited_timestamp`) as calls come. After, `scripts/thread.sh <thread id> 5` shows `-# 2 calls · …` and `done`, and no `-# run on admin` lines.
+- **Status.** In a thread, send `run "sleep 20; echo hi" on <worker> twice, then reply with the word done`. While it runs, `scripts/discord.sh "/channels/<thread id>/messages?limit=3" | jq '.[] | {content, components}'` shows the status with the Stop button, edited (`edited_timestamp`) as calls come. After, `scripts/thread.sh <thread id> 5` shows `-# 2 calls · …` and `done`, and no `-# run on <worker>` lines.
 - **Reply.** The `done` message has `message_reference.message_id` equal to the id `say.sh` printed.
-- **Stop.** Send a long task (`run "sleep 120" on admin`), then `!stop`. The status becomes `-# stopped after 1 call · …`, then the stop notice.
+- **Stop.** Send a long task (`run "sleep 120" on <worker>`), then `!stop`. The status becomes `-# stopped after 1 call · …`, then the stop notice.
 
 - **Marks.** `scripts/discord.sh /channels/<channel>/messages/<id> | jq -c '[.reactions[] | select(.me) | .emoji.name]'` is `["👀"]` while the turn runs, then `["✅"]` (`["❌"]` after `!stop`). For a start message, `<channel>` is the parent channel.
 
