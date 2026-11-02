@@ -20,7 +20,7 @@ Preconditions:
 
 - Baseline preconditions hold, and a `#sessions` text channel exists (`scripts/discord.sh /guilds/<guild>/channels`).
 
-- **New.** On the server: `printf '%s' '{"model":"claude-code/claude-haiku-5-5","preset":"claude-code/claude-haiku-5-5","tools":"default","context_limit":250000,"workers":[{"name":"admin"}],"params":{"effort":"low"}}' | mainplane new` prints the id; `mainplane message <id> "verify mirroring: reply with just the word one"`. Within about 5 seconds `scripts/thread.sh <#sessions id> 3` shows `` `<id>` · via cli · claude-code/claude-haiku-5-5 `` with `[thread <thread id>]`; `scripts/thread.sh <thread id>` shows `> **cli:** verify mirroring: …` then `one`.
+- **New.** On the server: `printf '%s' '{"model":"claude-code/claude-haiku-5-5","preset":"claude-code/claude-haiku-5-5","tools":"default","context_limit":250000,"workers":[{"name":"<worker>"}],"params":{"effort":"low"}}' | mainplane new` prints the id; `mainplane message <id> "verify mirroring: reply with just the word one"`. Within about 5 seconds `scripts/thread.sh <#sessions id> 3` shows `` `<id>` · via cli · claude-code/claude-haiku-5-5 `` with `[thread <thread id>]`; `scripts/thread.sh <thread id>` shows `> **cli:** verify mirroring: …` then `one`.
 - **Quote.** `mainplane message <id> "reply with just the word two"`. The thread shows `> **cli:** reply with just the word two`, then `two`.
 - **Continue.** `scripts/say.sh <thread id> "reply with just the word three"`. The thread shows `three`; `mainplane tail <id>` has the message `via=discord`, and the thread does not repeat it quoted.
 - **Delete.** `mainplane delete <id>`. Within about a minute `scripts/discord.sh /channels/<thread id> | jq .thread_metadata` shows `archived: true, locked: true`.

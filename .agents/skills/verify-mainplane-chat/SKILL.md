@@ -1,22 +1,22 @@
 ---
-name: verify-mainplane-discord
+name: verify-mainplane-chat
 description: Drive the mainplane-chat bot the way its user does, by typing in Discord or Slack, and keep evidence of what it did. Use to prove a change to the bot works, before a PR is ready.
 ---
 
 # Verify mainplane-chat
 
-The bot runs on the harness machine (denguinho-server) as the systemd user service `mainplane-chat`, from `~/go/bin/mainplane-chat`. A user drives it by typing in the Discord server "Mainplane"; it talks to the Mainplane harness at `http://127.0.0.1:8080`. Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
+The bot runs on the harness machine as the systemd user service `mainplane-chat`, from `~/go/bin/mainplane-chat`. A user drives it by typing in a private Discord server; it talks to the Mainplane harness at `http://127.0.0.1:8080`. Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
 
 | Thing | Value |
 | --- | --- |
-| Guild | `1565949504866222130` (Mainplane) |
+| Guild | the test server (`scripts/discord.sh /users/@me/guilds`) |
 | Test channel | `#bot-test` under Text Channels; only test messages go there |
-| Bot user | `1565948277302624298` |
-| Tester | its token in `~/.config/mainplane-chat/tester.env` (`TESTER_TOKEN=`), mode 600 |
+| Bot user | `scripts/discord.sh /users/@me` |
+| Tester | `~/.config/mainplane-chat/tester.env`, mode 600: `TESTER_TOKEN=` its token, `SLACK_DM=` the user's DM channel with the Slack app |
 | State file | `~/.local/state/mainplane-chat/state.json` on the server |
 | Logs | `journalctl --user -u mainplane-chat` on the server |
 
-The helpers in `scripts/` run on the server, from a checkout of this repo. From the Mac: `ssh denguinho-server 'cd <checkout> && .agents/skills/verify-mainplane-discord/scripts/<helper>'`.
+The helpers in `scripts/` run on the server, from a checkout of this repo.
 
 ## Launch
 
@@ -38,7 +38,7 @@ Ready when the journal shows `caught up` after the restart (`scripts/doctor.sh` 
 Post as the tester, read as the bot, check Mainplane with its CLI, all on the server:
 
 ```sh
-s=.agents/skills/verify-mainplane-discord/scripts
+s=.agents/skills/verify-mainplane-chat/scripts
 $s/say.sh <channel or thread id> "/info"      # prints the message id
 $s/thread.sh <channel or thread id> 5         # what the bot said, oldest first
 mainplane info <session id>; mainplane tail <session id>
@@ -48,7 +48,7 @@ A message in `#bot-test` starts a session and a thread on that message; `thread.
 
 ## Evidence
 
-For each feature driven, keep: the messages typed (time, text), `scripts/thread.sh` output after, the journal lines for the run, the state file's entry for the thread (`jq '.threads["discord:<thread id>"]'`), and `mainplane info` of each session involved. Put them under `/tmp/verify-mainplane-discord/<run>/` on the server.
+For each feature driven, keep: the messages typed (time, text), `scripts/thread.sh` output after, the journal lines for the run, the state file's entry for the thread (`jq '.threads["discord:<thread id>"]'`), and `mainplane info` of each session involved. Put them under `/tmp/verify-mainplane-chat/<run>/` on the server.
 
 ## Cleanup
 

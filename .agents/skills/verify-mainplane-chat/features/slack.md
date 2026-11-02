@@ -1,6 +1,6 @@
 # Slack
 
-The Slack side has no tester bot: tests post as the user in his DM with the app (`D0CE46P2QJY`; user `U09BMR1UGQJ`, bot `U0CDV71FRTP`) with `scripts/slack-say.sh`, which he approved. Read with `scripts/slack-thread.sh`. State keys are `slack:D0CE46P2QJY` (seen) and `slack:D0CE46P2QJY/<thread ts>`.
+The Slack side has no tester bot: tests post as the user in his DM with the app (`SLACK_DM` in `tester.env`) with `scripts/slack-say.sh`, with the user's approval. Read with `scripts/slack-thread.sh`. State keys are `slack:<SLACK_DM>` (seen) and `slack:<SLACK_DM>/<thread ts>`.
 
 - **Start.** `slack-say.sh "verify slack <run>: reply with the word ok"`. Expect a reply in the message's thread and ✅ on the message; the state has the thread.
 - **Turn status.** A reply that makes tool calls: a context-block status message, shrunk at the end to `` `<id>` · N calls · Ts · P% context ``.

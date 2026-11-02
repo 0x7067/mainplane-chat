@@ -28,8 +28,8 @@ Preconditions:
 - **Error buttons.** A stop notice has no `components`: a stop is on purpose, and a retry after it only adds the harness's `Continue`, which the agent may not act on. A failure's notice has a `retry:<id>` button and the `model:<id>` select; a failure is hard to cause on demand, so check it in code or when one happens.
 - **Switch, three times fast.** Send `/model <id A> reply with the word a`, then `/model <id B> reply with the word b`, then `/model <id A> reply with the word c`, each as soon as the last is sent. Each gets `-# continuing in session <new id> on <model>` within seconds, and `a`, `b`, `c` come back in order. `jq '.threads["discord:<thread id>"]'` on the state file is the third new id. The thread's name is unchanged.
 - **Continue.** Send `/continue reply with the word d`. A `continuing in session` line on the same model, then `d`.
-- **Stop.** Send `use the run tool to execute: sleep 120 on admin, then reply done`, wait for the `-# run on admin: sleep 120` line, then send `/stop`. A `⚠️` line says the session was stopped by discord; `mainplane info` shows `failed`.
-- **Retry.** Send `/retry`. `mainplane info` shows `stepping`, and the bot relays the step again (`-# run on admin: sleep 120`); send `/stop` to end it.
+- **Stop.** Send `use the run tool to execute: sleep 120 on <worker>, then reply done`, wait for the `-# run on <worker>: sleep 120` line, then send `/stop`. A `⚠️` line says the session was stopped by discord; `mainplane info` shows `failed`.
+- **Retry.** Send `/retry`. `mainplane info` shows `stepping`, and the bot relays the step again (`-# run on <worker>: sleep 120`); send `/stop` to end it.
 
 ## Gotchas
 
