@@ -1,20 +1,20 @@
 ---
 name: verify-mainplane-discord
-description: Drive the mainplane-discord bot the way its user does, by typing in Discord, and keep evidence of what it did. Use to prove a change to the bot works, before a PR is ready.
+description: Drive the mainplane-chat bot the way its user does, by typing in Discord or Slack, and keep evidence of what it did. Use to prove a change to the bot works, before a PR is ready.
 ---
 
-# Verify mainplane-discord
+# Verify mainplane-chat
 
-The bot runs on the harness machine (denguinho-server) as the systemd user service `mainplane-discord`, from `~/go/bin/mainplane-chat`. A user drives it by typing in the Discord server "Mainplane"; it talks to the Mainplane harness at `http://127.0.0.1:8080`. Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
+The bot runs on the harness machine (denguinho-server) as the systemd user service `mainplane-chat`, from `~/go/bin/mainplane-chat`. A user drives it by typing in the Discord server "Mainplane"; it talks to the Mainplane harness at `http://127.0.0.1:8080`. Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
 
 | Thing | Value |
 | --- | --- |
 | Guild | `1565949504866222130` (Mainplane) |
 | Test channel | `#bot-test` under Text Channels; only test messages go there |
 | Bot user | `1565948277302624298` |
-| Tester | its token in `~/.config/mainplane-discord/tester.env` (`TESTER_TOKEN=`), mode 600 |
+| Tester | its token in `~/.config/mainplane-chat/tester.env` (`TESTER_TOKEN=`), mode 600 |
 | State file | `~/.local/state/mainplane-chat/state.json` on the server |
-| Logs | `journalctl --user -u mainplane-discord` on the server |
+| Logs | `journalctl --user -u mainplane-chat` on the server |
 
 The helpers in `scripts/` run on the server, from a checkout of this repo. From the Mac: `ssh denguinho-server 'cd <checkout> && .agents/skills/verify-mainplane-discord/scripts/<helper>'`.
 
@@ -24,7 +24,7 @@ Build the branch under test and swap it in; keep the previous binary to restore.
 
 ```sh
 cp -p ~/go/bin/mainplane-chat ~/go/bin/mainplane-chat.prev
-go build -o ~/go/bin/mainplane-chat . && systemctl --user restart mainplane-discord
+go build -o ~/go/bin/mainplane-chat . && systemctl --user restart mainplane-chat
 ```
 
 Ready when the journal shows `caught up` after the restart (`scripts/doctor.sh` checks it). Teardown: restore `.prev` and restart, if the change is not being kept.

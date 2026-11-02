@@ -1,11 +1,11 @@
-# mainplane-discord verification map
+# mainplane-chat verification map
 
-The user-facing behavior of the mainplane-discord bot, one file per feature. Read this, then use the feature's file as the recipe.
+The user-facing behavior of the mainplane-chat bot, one file per feature. Read this, then use the feature's file as the recipe.
 
 ## Baseline preconditions
 
 - The build under test is running: `scripts/doctor.sh` passes from the checkout it was built from.
-- The tester bot is in the guild, `~/.config/mainplane-discord/tester.env` holds its token, and the bot's env sets `MAINPLANE_DISCORD_TESTER` to its user id.
+- The tester bot is in the guild, `~/.config/mainplane-chat/tester.env` holds its token, and the bot's env sets `MAINPLANE_DISCORD_TESTER` to its user id.
 - `#bot-test` exists in the Mainplane guild. Every test message goes there or in threads under it.
 - At least one provider is connected (`mainplane providers` on the server).
 
@@ -30,3 +30,4 @@ The user-facing behavior of the mainplane-discord bot, one file per feature. Rea
 - [continuations.md](continuations.md): a thread follows a continuation made in the terminal app.
 - [mirroring.md](mirroring.md): a session made outside Discord gets a thread in #sessions.
 - [catch-up.md](catch-up.md): what happened while the bot was down is picked up.
+- [slack.md](slack.md): the same features in a Slack DM, typed as the user.
