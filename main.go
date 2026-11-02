@@ -434,8 +434,11 @@ func (b *bridge) watchSessions() {
 			}
 			b.mu.Lock()
 			channel, since := b.sessions, b.st.MirrorSince
+			// A session a thread ever followed, kept across restarts: its thread
+			// may since have moved to a continuation.
+			_, followed := b.st.Relayed[in.ID]
 			b.mu.Unlock()
-			if !mirrored(via, in.Created, since) || len(b.threadsShowing(in.ID)) > 0 {
+			if !mirrored(via, in.Created, since) || followed {
 				checked[in.ID] = true
 				continue
 			}
