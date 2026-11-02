@@ -4,7 +4,7 @@
 # message's id. The bot handles it only while its MAINPLANE_DISCORD_TESTER is
 # the tester's user id.
 set -euo pipefail
-set -a; . "$HOME/.config/mainplane-discord/tester.env"; set +a
+set -a; . "$HOME/.config/mainplane-chat/tester.env"; set +a
 ch=$1 text=$2; shift 2
 files=(); i=0
 for f in "$@"; do files+=(-F "files[$i]=@$f"); i=$((i + 1)); done
