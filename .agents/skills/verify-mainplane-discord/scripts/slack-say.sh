@@ -6,4 +6,5 @@
 set -euo pipefail
 d=$(slack-axi draft D0CE46P2QJY "$1" ${2:+--reply "$2"} </dev/null | awk '/^draft:/ {print $2}')
 ts=$(slack-axi draft send "$d" </dev/null | awk -F'"' '/^ts:/ {print $2}')
+ts=${ts/./} # slack-axi prints it without its dot
 echo "${ts:0:10}.${ts:10}"
