@@ -18,7 +18,7 @@ The user-facing behavior of the mainplane-discord bot, one file per feature. Rea
 ## Proof and skip reporting
 
 - Capture what was typed and when, `scripts/thread.sh` after, the journal lines for the run, and `mainplane info` of each session involved.
-- A behavior that depends on the state file also needs the file's entry: `jq '.threads["<thread id>"]' ~/.local/state/mainplane-discord/state.json`.
+- A behavior that depends on the state file also needs the file's entry: `jq '.threads["discord:<thread id>"]' ~/.local/state/mainplane-chat/state.json`.
 - Report a step that could not run with the command tried and the precondition that was missing. Do not count a CLI-only check as proof of a Discord behavior.
 
 ## Features
