@@ -138,3 +138,10 @@ func TestThreadTitle(t *testing.T) {
 		t.Errorf("threadTitle(long) = %q (%d runes), want at most 100 ending in …", got, len([]rune(got)))
 	}
 }
+
+func TestJobLine(t *testing.T) {
+	got := jobLine("[job toolu_01X on admin exited 0 after 40s. Log: /home/u/.mainplane/jobs/toolu_01X.log]\nlots\nof log")
+	if want := "job on admin exited 0 after 40s"; got != want {
+		t.Errorf("jobLine = %q, want %q", got, want)
+	}
+}

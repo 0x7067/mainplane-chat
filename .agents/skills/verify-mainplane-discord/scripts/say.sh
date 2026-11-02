@@ -9,5 +9,5 @@ ch=$1 text=$2; shift 2
 files=(); i=0
 for f in "$@"; do files+=(-F "files[$i]=@$f"); i=$((i + 1)); done
 curl -fsS -X POST -H "Authorization: Bot $TESTER_TOKEN" \
-  -F "payload_json=$(jq -n --arg c "$text" '{content: $c}')" "${files[@]}" \
+  --form-string "payload_json=$(jq -n --arg c "$text" '{content: $c}')" "${files[@]}" \
   "https://discord.com/api/v10/channels/$ch/messages" | jq -r .id

@@ -782,8 +782,12 @@ func (b *bridge) follow(thread, id string, n int) {
 						t.key = r.IdempotencyKey
 						t.asked = append(t.asked, r.IdempotencyKey)
 					}
-					// The harness's own "Continue" from a retry is not a person's.
-					if r.Via != via && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain") {
+					// The harness's own "Continue" from a retry is not a person's, and
+					// a job's report is one line: its log tail floods the thread.
+					switch {
+					case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
+						b.say(thread, "-# "+jobLine(string(r.Body)))
+					case r.Via != via && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
 						b.say(thread, quote(r.Via, string(r.Body)))
 					}
 				case statefile.Name:
@@ -1004,6 +1008,18 @@ func (b *bridge) mark(thread, msgID, emoji string) {
 	if err := b.dc.MessageReactionAdd(ch, msgID, emoji); err != nil {
 		log.Printf("mark %s: %v", msgID, err)
 	}
+}
+
+// jobLine is the first line of a job's report without its ids and log path:
+// "[job toolu_x on admin exited 0 after 40s. Log: …]" is "job on admin exited
+// 0 after 40s".
+func jobLine(body string) string {
+	line, _, _ := strings.Cut(body, "\n")
+	line, _, _ = strings.Cut(strings.Trim(line, "[]"), ". Log:")
+	if f := strings.Fields(line); len(f) > 2 && f[0] == "job" {
+		line = "job " + strings.Join(f[2:], " ")
+	}
+	return line
 }
 
 // calls is "1 call" or "n calls".
