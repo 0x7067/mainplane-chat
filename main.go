@@ -131,13 +131,27 @@ func main() {
 		renames:   map[string]*title{},
 	}
 	b.load()
-	b.dc = newDiscord(b, mustEnv("DISCORD_TOKEN"), os.Getenv("MAINPLANE_DISCORD_TESTER"))
-	sl := newSlack(b, mustEnv("SLACK_BOT_TOKEN"), mustEnv("SLACK_APP_TOKEN"), mustEnv("MAINPLANE_SLACK_USERS"))
-	b.chats = map[string]chat{"discord": b.dc, "slack": sl}
+	b.chats = map[string]chat{}
+	var sl *slackChat
+	if token := os.Getenv("DISCORD_TOKEN"); token != "" {
+		b.dc = newDiscord(b, token, os.Getenv("MAINPLANE_DISCORD_TESTER"))
+		b.chats["discord"] = b.dc
+	}
+	if token := os.Getenv("SLACK_BOT_TOKEN"); token != "" {
+		sl = newSlack(b, token, mustEnv("SLACK_APP_TOKEN"), mustEnv("MAINPLANE_SLACK_USERS"))
+		b.chats["slack"] = sl
+	}
+	if len(b.chats) == 0 {
+		log.Fatal("set DISCORD_TOKEN, SLACK_BOT_TOKEN or both")
+	}
 	// After b.chats is set, as catching up starts followers.
-	b.dc.open()
-	sl.open()
-	defer b.dc.dc.Close()
+	if b.dc != nil {
+		b.dc.open()
+		defer b.dc.dc.Close()
+	}
+	if sl != nil {
+		sl.open()
+	}
 	go b.watchSessions()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -400,7 +414,7 @@ func (b *bridge) watchSessions() {
 			b.mu.Lock()
 			since := b.st.MirrorSince
 			b.mu.Unlock()
-			if _, ours := b.chats[from]; ours || moved[in.ID] || !in.Created.After(since) {
+			if b.dc == nil || from == "discord" || from == "slack" || moved[in.ID] || !in.Created.After(since) {
 				checked[in.ID] = true
 				continue
 			}
@@ -455,7 +469,7 @@ func (b *bridge) threadsShowing(id string) []string {
 	defer b.mu.Unlock()
 	var ts []string
 	for k, t := range b.st.Threads {
-		if t.Session == id {
+		if _, on := b.chats[platform(k)]; on && t.Session == id {
 			ts = append(ts, k)
 		}
 	}
