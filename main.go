@@ -181,6 +181,7 @@ func (b *bridge) command(th, id, msgID, text string) bool {
 		err = b.call("POST", "/sessions/"+id+"/stop?via="+platform(th), "", nil, nil)
 	case "retry":
 		if err = b.call("POST", "/sessions/"+id+"/retry?via="+platform(th), "", nil, nil); err == nil {
+			b.chat(th).react(th, "", seen) // the session works again; Slack shows it
 			b.resume(th, id)
 		}
 	case "info":
