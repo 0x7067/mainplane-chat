@@ -12,3 +12,9 @@ Files attached to a message go to the session with its text, as one post: the te
 ## Driving it with say.sh
 
 - **All three.** Make a tiny PNG with a word in it (`uv run --with pillow python -c ...`), a `notes.txt` holding a word, and a `blob.zip`. In `#bot-test`, send `verify files <run id>: reply with the word in the image and the word in notes.txt` with the three files. The reply names both words; `-# not sent: blob.zip` shows in the thread; `mainplane tail <id>` shows a text record with `notes.txt:` and an `image/png` record.
+
+## Out: attach
+
+A line `attach: /absolute/path` in the agent's text uploads that file, read on the bot's machine, with the message, and the line is not shown. A missing file shows `-# could not attach: <error>`.
+
+- **Attach.** In a thread, send `make /tmp/attach-test.txt holding the word heron, then reply with a line "attach: /tmp/attach-test.txt" and the word sent`. `scripts/discord.sh "/channels/<thread id>/messages?limit=1" | jq '.[0] | {content, files: [.attachments[].filename]}'` shows `sent` and `attach-test.txt`, and no `attach:` line.
