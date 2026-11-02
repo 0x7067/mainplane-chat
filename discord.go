@@ -29,7 +29,7 @@ type discord struct {
 
 var errNoSessions = errors.New("no #sessions channel")
 
-func openDiscord(b *bridge, token, tester string) *discord {
+func newDiscord(b *bridge, token, tester string) *discord {
 	dc, err := discordgo.New("Bot " + token)
 	if err != nil {
 		log.Fatal(err)
@@ -45,16 +45,19 @@ func openDiscord(b *bridge, token, tester string) *discord {
 	dc.AddHandler(func(_ *discordgo.Session, m *discordgo.MessageCreate) { d.work <- func() { d.handle(m.Message) } })
 	dc.AddHandler(func(_ *discordgo.Session, r *discordgo.Ready) { d.work <- func() { d.catchUp(r) } })
 	dc.AddHandler(d.onInteraction)
+	return d
+}
+
+func (d *discord) open() {
 	go func() {
 		for f := range d.work {
 			f()
 		}
 	}()
-	if err := dc.Open(); err != nil {
+	if err := d.dc.Open(); err != nil {
 		log.Fatal(err)
 	}
 	log.Print("connected")
-	return d
 }
 
 func (d *discord) key(id string) string { return "discord:" + id }

@@ -129,9 +129,10 @@ func main() {
 		renames:   map[string]*title{},
 	}
 	b.load()
-	b.dc = openDiscord(b, mustEnv("DISCORD_TOKEN"), os.Getenv("MAINPLANE_DISCORD_TESTER"))
-	defer b.dc.dc.Close()
+	b.dc = newDiscord(b, mustEnv("DISCORD_TOKEN"), os.Getenv("MAINPLANE_DISCORD_TESTER"))
 	b.chats = map[string]chat{"discord": b.dc}
+	b.dc.open() // after b.chats is set, as catching up starts followers
+	defer b.dc.dc.Close()
 	go b.watchSessions()
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
