@@ -3,7 +3,7 @@
 **Talk to your [Mainplane](https://github.com/mainplane-ai/mainplane) agents from Discord and Slack.** Every session is a thread. You see the agent work live, stop it with a button, send it files, and get files back. Long tasks keep going past the context limit on their own.
 
 <p align="center">
-  <img src="docs/discord.png" alt="A Discord thread: a message starts a Mainplane session, a live status message lists its tool calls, and the agent replies with an attached chart" width="860">
+  <img src="docs/discord.gif" alt="A Discord thread: a message starts a Mainplane session, a live status message lists its tool calls, and the agent replies with an attached chart" width="860">
 </p>
 
 [Mainplane](https://github.com/mainplane-ai/mainplane) is an open-source agent harness. It runs agents on any model and lets them control your computers. You message the agents through connectors, such as its terminal app and CLI. mainplane-chat adds Discord and Slack as connectors. It is a small Go service that runs next to your Mainplane server and talks to its API.
@@ -28,12 +28,14 @@
 - **Slack agent sessions.** In Slack, a thread is a native agent session, with its title, working state and Stop button.
 
 <p align="center">
-  <img src="docs/slack.png" alt="A Slack DM with the Mainplane app: an agent session thread with its title, a status line and the agent's reply" width="860">
+  <img src="docs/slack.gif" alt="A Slack DM with the Mainplane app: an agent session thread with its title, a status line and the agent's reply" width="860">
 </p>
+
+<sub>The demos are re-creations of real sessions, with the worker names changed.</sub>
 
 ## Setup
 
-You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#self-hosting-quickstart) and Go 1.27 or later. Run mainplane-chat on the same machine as the server.
+You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#self-hosting-quickstart) and Go 1.27 or later. Run mainplane-chat on the same machine as the server. Use Discord, Slack or both.
 
 1. Make a harness key for the bot:
 
@@ -41,9 +43,9 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
    mainplane-server key new chat
    ```
 
-2. Make a Discord bot in the [Developer Portal](https://discord.com/developers/applications). Turn on the **Message Content** intent. Invite it to a private server with permission to read and send messages, manage threads, add reactions and attach files. Make a text channel named `sessions` for sessions started outside Discord.
+2. For Discord, make a bot in the [Developer Portal](https://discord.com/developers/applications). Turn on the **Message Content** intent. Invite it to a private server with permission to read and send messages, manage threads, add reactions and attach files. Make a text channel named `sessions` for sessions started outside Discord.
 
-3. Make a Slack app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode.
+3. For Slack, make an app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode.
 
 4. Install and run:
 
@@ -58,10 +60,10 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
 | --- | --- |
 | `MAINPLANE_KEY` | the harness key from step 1 |
 | `MAINPLANE_URL` | the harness URL; default `http://127.0.0.1:8080` |
-| `DISCORD_TOKEN` | the Discord bot token |
-| `SLACK_BOT_TOKEN` | the `xoxb-` token of the Slack app |
-| `SLACK_APP_TOKEN` | the `xapp-` app-level token |
-| `MAINPLANE_SLACK_USERS` | comma-separated Slack user ids the bot takes messages from |
+| `DISCORD_TOKEN` | the Discord bot token; leave it unset to run Slack only |
+| `SLACK_BOT_TOKEN` | the `xoxb-` token of the Slack app; leave it unset to run Discord only |
+| `SLACK_APP_TOKEN` | the `xapp-` app-level token, with Slack |
+| `MAINPLANE_SLACK_USERS` | with Slack: comma-separated Slack user ids the bot takes messages from |
 | `MAINPLANE_DISCORD_TESTER` | optional: the user id of a tester bot whose messages the bot takes as a person's, for end-to-end tests. Other bots stay ignored |
 
 The bot keeps its state in `$XDG_STATE_HOME/mainplane-chat/state.json` (`~/.local/state` by default).
