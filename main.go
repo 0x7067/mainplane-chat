@@ -1,12 +1,13 @@
-// mainplane-chat drives Mainplane agents from chat apps, the way the
-// mainplane terminal app does. A message in a channel starts a session in a
-// new thread; messages in that thread continue it, and the agent's replies
-// come back there. A thread takes the terminal app's /model, /continue and
-// /stop, and the CLI's /retry and /info. What happens while the bot is down is
-// picked up when it comes back.
+// mainplane-chat drives Mainplane agents from Discord and Slack, the way the
+// mainplane terminal app does. A message in a channel or DM starts a session
+// in a new thread; messages in that thread continue it, and the agent's
+// replies come back there. A thread takes the terminal app's /model,
+// /continue and /stop, and the CLI's /retry and /info (in Slack, as !model
+// and so on). What happens while the bot is down is picked up when it comes
+// back.
 //
 // This file is the core: the harness client, following sessions, commands,
-// continuations and the state. Each chat app is an adapter (discord.go) that
+// continuations and the state. Each chat app is an adapter (discord.go, slack.go) that
 // turns its events into calls of the core and shows what the core says.
 package main
 
@@ -80,7 +81,8 @@ type thread struct {
 // chat is what the core needs of a chat app. th is a thread's key.
 type chat interface {
 	say(th string, m msg)
-	// status posts or edits the turn's status message; t.done shrinks it.
+	// status posts or edits the turn's status message; t.done shrinks it, and
+	// comes at the end of every turn, with or without a status message.
 	status(th, id string, t *turn)
 	react(th, msgID, emoji string)
 	rename(th, id, name string)
@@ -130,8 +132,11 @@ func main() {
 	}
 	b.load()
 	b.dc = newDiscord(b, mustEnv("DISCORD_TOKEN"), os.Getenv("MAINPLANE_DISCORD_TESTER"))
-	b.chats = map[string]chat{"discord": b.dc}
-	b.dc.open() // after b.chats is set, as catching up starts followers
+	sl := newSlack(b, mustEnv("SLACK_BOT_TOKEN"), mustEnv("SLACK_APP_TOKEN"), mustEnv("MAINPLANE_SLACK_USERS"))
+	b.chats = map[string]chat{"discord": b.dc, "slack": sl}
+	// After b.chats is set, as catching up starts followers.
+	b.dc.open()
+	sl.open()
 	defer b.dc.dc.Close()
 	go b.watchSessions()
 	stop := make(chan os.Signal, 1)
@@ -266,7 +271,7 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 		}
 		id := pickModel(cat, ids, model)
 		if id == "" {
-			return "", fmt.Errorf("no connected model %q: /model lists them", model)
+			return "", fmt.Errorf("no connected model %q: !model lists them", model)
 		}
 		conf = presetConf(id, cat.Presets[id])
 		conf.Workers = cur.Config.Workers
@@ -462,7 +467,7 @@ func (b *bridge) listModels(th, id string) error {
 	if err != nil {
 		return err
 	}
-	b.say(th, msg{Note: "continue in a new session on another model, or `/model <id> [message]`", Session: id, Models: ms})
+	b.say(th, msg{Note: "continue in a new session on another model, or `!model <id> [message]`", Session: id, Models: ms})
 	return nil
 }
 
@@ -806,13 +811,13 @@ type turn struct {
 // "stopped".
 func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	took := time.Since(t.start).Round(time.Second)
-	if t.status != "" {
-		t.done, t.outcome, t.took, t.used = true, outcome, took, -1
-		if i, err := b.info(id); outcome == "" && err == nil && i.Config.ContextLimit > 0 {
+	t.done, t.outcome, t.took, t.used = true, outcome, took, -1
+	if t.status != "" && outcome == "" {
+		if i, err := b.info(id); err == nil && i.Config.ContextLimit > 0 {
 			t.used = i.ContextUsed * 100 / i.Config.ContextLimit
 		}
-		b.chat(th).status(th, id, t)
 	}
+	b.chat(th).status(th, id, t)
 	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	*t = turn{}
 	result := done
