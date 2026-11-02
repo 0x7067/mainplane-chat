@@ -163,7 +163,11 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		th := s.thread(m.Channel, m.TimeStamp)
 		// The thread is the message's; the agent session's title is its first
 		// words, or its first file's name.
-		title := firstWords(cmp.Or(text, files[0].name), 80)
+		label := text
+		if label == "" {
+			label = files[0].name // a message with only files
+		}
+		title := firstWords(label, 80)
 		open := func(string) (string, error) {
 			if _, err := s.sl.SetAgentSessionStatus(slack.AgentSessionSetStatusParameters{Status: "processing", ChannelID: m.Channel, ThreadTS: m.TimeStamp, Title: title}); err != nil {
 				log.Printf("session status %s: %v", th, err)
