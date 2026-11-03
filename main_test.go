@@ -161,3 +161,32 @@ func TestPartsPrefixOnlyWithContent(t *testing.T) {
 		t.Errorf("text message = %v, want one part with the prefix", ps)
 	}
 }
+
+func TestProviderFull(t *testing.T) {
+	for body, want := range map[string]bool{
+		`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"request (65537 tokens) exceeds the available context size (65536 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":65537,"n_ctx":65536}}`: true,
+		`openai-chat: 400 Bad Request: {"error":{"code":"context_length_exceeded","message":"maximum context length"}}`:                                                                                                                         true,
+		`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"Field 'max_tokens': Value must be between -1 <= value <= 2147483647, but got -5"}}`:                                                                                      false,
+		"context 250009 exceeds limit 250000": false,
+	} {
+		if got := providerFull(body); got != want {
+			t.Errorf("providerFull(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
+
+func TestLongEnough(t *testing.T) {
+	for _, c := range []struct {
+		used, limit int
+		want        bool
+	}{
+		{65427, 65536, true}, // the session that hit the provider's window
+		{32768, 65536, true}, // half
+		{4200, 65536, false}, // a fresh session: one message too big on its own
+		{100, 0, false},      // no limit known
+	} {
+		if got := longEnough(c.used, c.limit); got != c.want {
+			t.Errorf("longEnough(%d, %d) = %v, want %v", c.used, c.limit, got, c.want)
+		}
+	}
+}

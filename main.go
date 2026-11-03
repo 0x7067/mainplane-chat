@@ -313,6 +313,34 @@ func contextFull(body string) bool {
 	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
 }
 
+// providerFull is whether an error record is the provider refusing a request
+// longer than its context window (llama-server: exceed_context_size_error;
+// OpenAI: context_length_exceeded). When that window is no larger than the
+// session's limit, the provider refuses before the harness ends the session.
+func providerFull(body string) bool {
+	return strings.Contains(body, "exceed_context_size_error") || strings.Contains(body, "context_length_exceeded")
+}
+
+// longEnough is whether a session used enough of its context limit for a
+// provider's refusal to mean the session is full. A request too big on its
+// own, such as one huge message, fails at once in a new session too, so it
+// gets Retry, not a chain of continuations.
+func longEnough(used, limit int) bool {
+	return limit > 0 && used*2 >= limit
+}
+
+// endedFull is whether a session's error record ends it full, so the bot continues it.
+func (b *bridge) endedFull(id, body string) bool {
+	if contextFull(body) {
+		return true
+	}
+	if !providerFull(body) {
+		return false
+	}
+	i, err := b.info(id)
+	return err == nil && longEnough(i.ContextUsed, i.Config.ContextLimit)
+}
+
 // fullKey starts the idempotency key of the first message of a session the
 // bot continues because the one before was full; the full session's id ends it.
 const fullKey = "context-full-"
@@ -794,7 +822,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		b.finish(th, id, t, outcome)
 		text := "⚠️ " + string(r.Body)
 		switch {
-		case contextFull(string(r.Body)) && b.shows(th, id):
+		case b.shows(th, id) && b.endedFull(id, string(r.Body)):
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
 			b.continueFull(th, id, r.N)
