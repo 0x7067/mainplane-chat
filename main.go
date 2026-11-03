@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,7 +28,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -311,6 +314,59 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 // its context limit: "context 250009 exceeds limit 250000".
 func contextFull(body string) bool {
 	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
+}
+
+// providerFull is whether an error record is the provider refusing a request
+// longer than its context window (llama-server: exceed_context_size_error;
+// OpenAI: context_length_exceeded). When that window is no larger than the
+// session's limit, the provider refuses before the harness ends the session.
+func providerFull(body string) bool {
+	return strings.Contains(body, "exceed_context_size_error") || strings.Contains(body, "context_length_exceeded")
+}
+
+// overflowSizes are the request's tokens and the provider's window from its
+// refusal: llama-server's "n_prompt_tokens":N and "n_ctx":N, or OpenAI's
+// "maximum context length is N tokens ... resulted in (or you requested) N tokens". Zero when
+// the body does not say.
+var (
+	llamaPrompt = regexp.MustCompile(`"n_prompt_tokens"\s*:\s*(\d+)`)
+	llamaCtx    = regexp.MustCompile(`"n_ctx"\s*:\s*(\d+)`)
+	openaiCtx   = regexp.MustCompile(`maximum context length is (\d+) tokens`)
+	openaiReq   = regexp.MustCompile(`(?:resulted in|you requested) (\d+) tokens`)
+)
+
+func overflowSizes(body string) (request, window int) {
+	num := func(re *regexp.Regexp) int {
+		if m := re.FindStringSubmatch(body); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			return n
+		}
+		return 0
+	}
+	return cmp.Or(num(llamaPrompt), num(openaiReq)), cmp.Or(num(llamaCtx), num(openaiCtx))
+}
+
+// historyOverflow is whether a provider's refusal came from the session's
+// history rather than from what was just added: what the request adds over
+// the context the session last used is under half the window, so a new
+// session, which starts with only that, fits. One oversized message, at any
+// point in a session, keeps Retry instead of failing again in a continuation.
+// Without the sizes, it is not a history overflow.
+func historyOverflow(body string, used int) bool {
+	request, window := overflowSizes(body)
+	return request > 0 && window > 0 && (request-used)*2 < window
+}
+
+// endedFull is whether a session's error record ends it full, so the bot continues it.
+func (b *bridge) endedFull(id, body string) bool {
+	if contextFull(body) {
+		return true
+	}
+	if !providerFull(body) {
+		return false
+	}
+	i, err := b.info(id)
+	return err == nil && historyOverflow(body, i.ContextUsed)
 }
 
 // fullKey starts the idempotency key of the first message of a session the
@@ -794,7 +850,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		b.finish(th, id, t, outcome)
 		text := "⚠️ " + string(r.Body)
 		switch {
-		case contextFull(string(r.Body)) && b.shows(th, id):
+		case b.shows(th, id) && b.endedFull(id, string(r.Body)):
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
 			b.continueFull(th, id, r.N)

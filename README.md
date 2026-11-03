@@ -23,7 +23,7 @@
 - **Files in both directions.** Send images and text files with a message. The agent sends a file back with a line `attach: /path/to/file` in its reply.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
 - **Recovery.** A failed step comes with a Retry button and a model picker. When a provider's quota runs out, continue on another model in one click.
-- **No context limit.** When a session fills its context, the bot continues it in a new session and passes on the last message. The thread follows.
+- **No context limit.** When a session fills its context, the bot continues it in a new session and passes on the last message. The thread follows. A provider that refuses a request longer than its context window (llama-server's `exceed_context_size_error`, OpenAI's `context_length_exceeded`) counts as full too when the sizes in its error show the history filled the window: what the request adds over the session's last context is under half the window. One oversized message keeps Retry.
 - **Catches up.** What happens while the bot is down is picked up when it starts again.
 - **Slack agent sessions.** In Slack, a thread is a native agent session, with its title, working state and Stop button.
 
