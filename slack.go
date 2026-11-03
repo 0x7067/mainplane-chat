@@ -217,7 +217,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	}
 	if id := s.b.sessionFor(th); id != "" {
 		if !s.b.command(th, id, m.TimeStamp, text) {
-			s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, text, false), files)
+			s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, false), text, files)
 		}
 		return
 	}
@@ -238,7 +238,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		}
 		return th, nil
 	}
-	if err := s.b.start("slack", open, m.TimeStamp, s.framed(m.Channel, m.User, text, true), files); err != nil {
+	if err := s.b.start("slack", open, m.TimeStamp, s.framed(m.Channel, m.User, true), text, files); err != nil {
 		s.say(th, msg{Text: err.Error()})
 	}
 }
@@ -606,15 +606,15 @@ func (s *slackChat) display(user string) string {
 	return user
 }
 
-// framed is a message's text as the agent gets it: who wrote it, so the agent
-// can tell several people apart and mention them, and on a session's first
-// message, that it is a Slack app and where the conversation is.
-func (s *slackChat) framed(channel, user, text string, first bool) string {
+// framed is what goes before a message's text for the agent: who wrote it, so
+// the agent can tell several people apart and mention them, and on a session's
+// first message, that it is a Slack app and where the conversation is.
+func (s *slackChat) framed(channel, user string, first bool) string {
 	where := ""
 	if first {
 		where = s.where(channel)
 	}
-	return frame(s.name, where, s.display(user), user, text)
+	return frame(s.name, where, s.display(user), user)
 }
 
 // where describes a conversation: a DM, a group DM and who is in it, or a
@@ -656,11 +656,11 @@ func describe(info *slack.Channel, names []string) string {
 	}
 }
 
-// frame prefixes text with its author and Slack mention. When where is set (a
-// session's first message), a note first tells the agent it is a Slack app,
-// where the thread is, and how its replies show.
-func frame(bot, where, author, user, text string) string {
-	line := "[" + author + " <@" + user + ">]: " + text
+// frame is the prefix of a message: its author and Slack mention. When where is
+// set (a session's first message), a note first tells the agent it is a Slack
+// app, where the thread is, and how its replies show.
+func frame(bot, where, author, user string) string {
+	line := "[" + author + " <@" + user + ">]: "
 	if where == "" {
 		return line
 	}

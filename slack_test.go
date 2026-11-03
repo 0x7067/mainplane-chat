@@ -83,10 +83,10 @@ func TestAllowedListedUsersWithoutLookup(t *testing.T) {
 }
 
 func TestFrame(t *testing.T) {
-	if got, want := frame("symphony", "", "gabrielg", "U07", "hi"), "[gabrielg <@U07>]: hi"; got != want {
+	if got, want := frame("symphony", "", "gabrielg", "U07")+"hi", "[gabrielg <@U07>]: hi"; got != want {
 		t.Errorf("later message = %q, want %q", got, want)
 	}
-	first := frame("symphony", "a group DM with pedro, gabrielg", "pedro", "U09", "what can you do")
+	first := frame("symphony", "a group DM with pedro, gabrielg", "pedro", "U09") + "what can you do"
 	for _, want := range []string{
 		"you are symphony, an app in Slack",
 		"a Slack thread in a group DM with pedro, gabrielg",
