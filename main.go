@@ -761,15 +761,13 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		switch {
 		case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Note: jobLine(string(r.Body))})
-		case r.Via != platform(th) && strings.HasPrefix(r.Type, "text/plain"):
-			if r.Via != "retry" {
-				b.say(th, msg{Text: quote(r.Via, string(r.Body))})
-			}
-			// A turn asked from elsewhere, or retried, shows on the thread itself.
-			if !slices.Contains(t.asked, "") {
-				t.asked = append(t.asked, "")
-				b.chat(th).react(th, "", seen)
-			}
+		case r.Via != platform(th) && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
+			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
+		}
+		// Every turn asked or retried, from anywhere, shows on the thread itself.
+		if r.Via != "job" && strings.HasPrefix(r.Type, "text/plain") && !slices.Contains(t.asked, "") {
+			t.asked = append(t.asked, "")
+			b.chat(th).react(th, "", seen)
 		}
 	case statefile.Name:
 		// The session's label, often set by its agent at the start: the thread

@@ -1,13 +1,13 @@
 # Mirroring sessions made elsewhere
 
-Mainplane syncs sessions across every connector, so a session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`: a post "`<id>` · via `<source>` · `<model>`" with the thread on it, named `<id> <first words>`. The thread relays the agent and shows messages sent from elsewhere quoted with their source; messages typed in it continue the session. The post shows how the last turn went, as a start message does: 👀 while the agent works on a message from elsewhere, then ✅ or ❌. Only sessions made after mirroring began (`mirror_since` in the state file) are mirrored. Deleting the session deletes the thread and its post, so `#sessions` lists what the terminal app lists.
+Mainplane syncs sessions across every connector, so a session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`: a post "`<id>` · via `<source>` · `<model>`" with the thread on it, named `<id> <first words>`. The thread relays the agent and shows messages sent from elsewhere quoted with their source; messages typed in it continue the session. The post shows how the last turn went, as a start message does: 👀 while the agent works, then ✅ or ❌. Only sessions made after mirroring began (`mirror_since` in the state file) are mirrored. Deleting the session deletes the thread and its post, so `#sessions` lists what the terminal app lists.
 
 ## Sub-features
 
 - `mirror-new` a session made with the CLI gets a thread in `#sessions` within a few seconds, its first message quoted and its reply relayed.
 - `mirror-quote` a later message sent from the CLI shows in the thread as `> **cli:** …`; in any thread, Discord messages are not repeated.
 - `mirror-continue` a message typed in the mirrored thread continues the session.
-- `mirror-mark` the post gets 👀 while a turn asked from elsewhere runs, then ✅, or ❌ when it fails or is stopped.
+- `mirror-mark` the post gets 👀 while a turn runs, asked from anywhere, then ✅, or ❌ when it fails or is stopped.
 - `mirror-delete` deleting the session deletes its thread and post.
 
 ## How to get to it (user POV)
