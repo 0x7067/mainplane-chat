@@ -84,6 +84,8 @@ func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
 
 // scopeNeeds are the bot scopes slack-manifest.yaml asks for, each with what
 // goes without it, so a deployment's app with fewer says at start what it lacks.
+// Event subscriptions (message.channels, ...) are not visible to a bot token:
+// an app with a history scope but not its event still hears nothing there.
 var scopeNeeds = []struct{ scope, without string }{
 	{"assistant:write", "threads are not agent sessions: no title, working state or Stop"},
 	{"chat:write", "the bot cannot post"},
@@ -130,7 +132,11 @@ func grantedScopes(token string) (string, error) {
 		return "", err
 	}
 	resp.Body.Close()
-	return resp.Header.Get("X-OAuth-Scopes"), nil
+	have := resp.Header.Get("X-OAuth-Scopes")
+	if resp.StatusCode != http.StatusOK || have == "" {
+		return "", fmt.Errorf("auth.test: HTTP %d, no X-OAuth-Scopes", resp.StatusCode)
+	}
+	return have, nil
 }
 
 // open follows the sessions of the Slack threads from the last record
