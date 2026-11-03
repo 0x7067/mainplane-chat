@@ -193,6 +193,8 @@ func TestHistoryOverflow(t *testing.T) {
 		{"one huge message in a fresh session", llama(200025, 65536), 0, false},
 		{"openai, history", openai, 127000, true},
 		{"openai, huge message", openai, 20000, false},
+		{"llama-server JSON with spaces", `{"type":"exceed_context_size_error","n_prompt_tokens": 65537,"n_ctx": 65536}`, 65427, true},
+		{"openai, 'you requested'", `This model's maximum context length is 8192 tokens. However, you requested 9000 tokens (8800 in the messages, 200 in the completion). context_length_exceeded`, 8000, true},
 		{"no sizes in the error", `openai-chat: 400 Bad Request: {"error":{"code":"context_length_exceeded"}}`, 60000, false},
 	} {
 		if got := historyOverflow(c.body, c.used); got != c.want {

@@ -326,13 +326,13 @@ func providerFull(body string) bool {
 
 // overflowSizes are the request's tokens and the provider's window from its
 // refusal: llama-server's "n_prompt_tokens":N and "n_ctx":N, or OpenAI's
-// "maximum context length is N tokens ... resulted in N tokens". Zero when
+// "maximum context length is N tokens ... resulted in (or you requested) N tokens". Zero when
 // the body does not say.
 var (
-	llamaPrompt = regexp.MustCompile(`"n_prompt_tokens":(\d+)`)
-	llamaCtx    = regexp.MustCompile(`"n_ctx":(\d+)`)
+	llamaPrompt = regexp.MustCompile(`"n_prompt_tokens"\s*:\s*(\d+)`)
+	llamaCtx    = regexp.MustCompile(`"n_ctx"\s*:\s*(\d+)`)
 	openaiCtx   = regexp.MustCompile(`maximum context length is (\d+) tokens`)
-	openaiReq   = regexp.MustCompile(`resulted in (\d+) tokens`)
+	openaiReq   = regexp.MustCompile(`(?:resulted in|you requested) (\d+) tokens`)
 )
 
 func overflowSizes(body string) (request, window int) {
