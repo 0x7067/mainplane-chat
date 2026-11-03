@@ -54,7 +54,7 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
    mainplane-chat
    ```
 
-   To keep it running, use a systemd user service or similar, with the environment below in an env file.
+   To keep it running, use a systemd user service or similar, with the environment below in an env file. On macOS, use a user LaunchAgent with `RunAtLoad` and `KeepAlive`, whose program is `/bin/zsh -c 'set -a; source $HOME/.config/mainplane-chat/env; exec $HOME/.local/bin/mainplane-chat'`, and restart it with `launchctl kickstart -k gui/$(id -u)/<label>`.
 
 | Variable | |
 | --- | --- |
