@@ -34,18 +34,31 @@ type slackChat struct {
 	sl      *slack.Client
 	sm      *socketmode.Client
 	users   map[string]bool // the Slack users the bot takes messages from
+	members bool            // "*" in MAINPLANE_SLACK_USERS: also every full member of the bot's workspace
+	team    string          // the bot's workspace
 	self    string          // the bot's own Slack user
 	mention *regexp.Regexp  // the bot's mention in a message's text
 	work    chan func()     // the events' work, done in order by one goroutine
 
 	mu         sync.Mutex
 	processing map[string]time.Time // thread -> when Slack was last told it is processing
+	member     map[string]checked   // user -> whether a full member, when "*" is on
+}
+
+// checked is a cached answer to whether a user is a full member.
+type checked struct {
+	ok bool
+	at time.Time
 }
 
 func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
-	s := &slackChat{b: b, users: map[string]bool{}, work: make(chan func(), 256), processing: map[string]time.Time{}}
+	s := &slackChat{b: b, users: map[string]bool{}, work: make(chan func(), 256), processing: map[string]time.Time{}, member: map[string]checked{}}
 	for _, u := range strings.Split(users, ",") {
-		s.users[strings.TrimSpace(u)] = true
+		if u = strings.TrimSpace(u); u == "*" {
+			s.members = true
+		} else if u != "" {
+			s.users[u] = true
+		}
 	}
 	s.sl = slack.New(botToken, slack.OptionAppLevelToken(appToken), slack.OptionRetry(3))
 	me, err := s.sl.AuthTest()
@@ -53,6 +66,7 @@ func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
 		log.Fatalf("slack: %v", err)
 	}
 	s.self = me.UserID
+	s.team = me.TeamID
 	s.mention = mentionOf(s.self)
 	s.sm = socketmode.New(s.sl)
 	return s
@@ -120,7 +134,7 @@ func (s *slackChat) run() {
 // picking m is !model m. The message the control is on stands for the
 // person's.
 func (s *slackChat) act(cb slack.InteractionCallback) {
-	if !s.users[cb.User.ID] {
+	if !s.allowed(cb.User.ID) {
 		return
 	}
 	th := s.thread(cb.Container.ChannelID, cb.Container.ThreadTs)
@@ -187,8 +201,8 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	if m.User == s.self {
 		return
 	}
-	if !s.users[m.User] {
-		log.Printf("ignored a message from %s, who is not in MAINPLANE_SLACK_USERS", m.User)
+	if !s.allowed(m.User) {
+		log.Printf("ignored a message from %s, who is not allowed by MAINPLANE_SLACK_USERS", m.User)
 		return
 	}
 	text := plain(s.mention.ReplaceAllString(m.Text, ""))
@@ -339,7 +353,7 @@ func (s *slackChat) replies(ch, thread, after string) ([]slack.Message, error) {
 func (s *slackChat) stopped(ev *slackevents.AgentSessionStoppedEvent) {
 	th := s.thread(ev.Channel, ev.ThreadTimestamp)
 	id := s.b.sessionFor(th)
-	if id == "" || !s.users[ev.User] {
+	if id == "" || !s.allowed(ev.User) {
 		return
 	}
 	if err := s.b.call("POST", "/sessions/"+id+"/stop?via=slack", "", nil, nil); err != nil {
@@ -351,7 +365,7 @@ func (s *slackChat) stopped(ev *slackevents.AgentSessionStoppedEvent) {
 // renamed gives a title set in Slack to the thread's session as its name.
 func (s *slackChat) renamed(ev *slackevents.AgentSessionTitleChangedEvent) {
 	id := s.b.sessionFor(s.thread(ev.Channel, ev.ThreadTimestamp))
-	if id == "" || !s.users[ev.User] {
+	if id == "" || !s.allowed(ev.User) {
 		return
 	}
 	if err := s.b.call("PUT", "/sessions/"+id+"/name?via=slack", "text/plain; charset=utf-8", strings.NewReader(ev.Title), nil); err != nil {
@@ -545,4 +559,41 @@ func plain(text string) string {
 		return s[1]
 	})
 	return strings.TrimSpace(html.UnescapeString(text))
+}
+
+// allowed reports whether the bot takes messages from a Slack user: one listed
+// in MAINPLANE_SLACK_USERS, or with "*" there, any full member of the bot's
+// workspace. Answers from Slack are cached for ten minutes; a failed lookup
+// denies and is retried on the next message.
+func (s *slackChat) allowed(user string) bool {
+	if s.users[user] {
+		return true
+	}
+	if !s.members || user == "" {
+		return false
+	}
+	s.mu.Lock()
+	c, ok := s.member[user]
+	s.mu.Unlock()
+	if ok && time.Since(c.at) < 10*time.Minute {
+		return c.ok
+	}
+	u, err := s.sl.GetUserInfo(user)
+	if err != nil {
+		log.Printf("users.info %s: %v", user, err)
+		return false
+	}
+	c = checked{ok: fullMember(u, s.team), at: time.Now()}
+	s.mu.Lock()
+	s.member[user] = c
+	s.mu.Unlock()
+	return c.ok
+}
+
+// fullMember is a person with a regular account in the given workspace: not a
+// guest (single- or multi-channel), not from another organization through
+// Slack Connect, not a bot or app, and not deactivated.
+func fullMember(u *slack.User, team string) bool {
+	return u.TeamID == team && !u.IsRestricted && !u.IsUltraRestricted && !u.IsStranger &&
+		!u.IsBot && !u.IsAppUser && !u.Deleted && u.ID != "USLACKBOT"
 }
