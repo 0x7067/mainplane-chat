@@ -1,6 +1,9 @@
 package main
 
 import (
+	"os"
+	"regexp"
+	"slices"
 	"strings"
 	"testing"
 
@@ -118,5 +121,39 @@ func TestDescribe(t *testing.T) {
 	}
 	if got := describe(ch(func(c *slack.Channel) { c.IsMpIM = true }), []string{"a", "b"}); got != "a group DM with a, b" {
 		t.Errorf("describe group DM with names = %q", got)
+	}
+}
+
+func TestScopeNeedsAreTheManifests(t *testing.T) {
+	m, err := os.ReadFile("slack-manifest.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	bot := regexp.MustCompile(`(?s)\n    bot:\n(.*?)\nsettings:`).FindSubmatch(m)[1]
+	var want, got []string
+	for _, l := range regexp.MustCompile(`(?m)^\s+- (\S+)$`).FindAllSubmatch(bot, -1) {
+		want = append(want, string(l[1]))
+	}
+	for _, n := range scopeNeeds {
+		got = append(got, n.scope)
+	}
+	slices.Sort(want)
+	slices.Sort(got)
+	if !slices.Equal(got, want) {
+		t.Fatalf("scopeNeeds %v, manifest %v", got, want)
+	}
+}
+
+func TestLacking(t *testing.T) {
+	all := make([]string, len(scopeNeeds))
+	for i, n := range scopeNeeds {
+		all[i] = n.scope
+	}
+	if l := lacking(strings.Join(all, ",")); l != nil {
+		t.Fatalf("all scopes: %v", l)
+	}
+	l := lacking("assistant:write,chat:write,reactions:write,im:history,files:read,files:write")
+	if len(l) != 8 || !strings.HasPrefix(l[0], "the app lacks channels:history: ") {
+		t.Fatalf("DM-only: %v", l)
 	}
 }
