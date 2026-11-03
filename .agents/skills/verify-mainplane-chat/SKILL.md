@@ -31,7 +31,7 @@ Ready when the log shows `caught up` after the restart. Teardown: restore `.prev
 
 ## Doctor
 
-`scripts/doctor.sh` (read-only) is written for systemd: it checks `systemctl --user` and `journalctl`, so on the M4 read the log and check the LaunchAgent with `launchctl print gui/$(id -u)/local.mainplane-chat` by hand. It checks that the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
+`scripts/doctor.sh` (read-only) checks the LaunchAgent and its log file on macOS (the M4), and `systemctl --user` and `journalctl` elsewhere. It checks that the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
 
 ## Drive
 
