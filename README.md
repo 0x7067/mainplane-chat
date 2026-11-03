@@ -106,6 +106,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 
 - A top-level DM to the app starts a session in its thread, which is a Slack agent session. Slack shows its title (the first words, then the session's name), its working state and a Stop button. A title changed in Slack names the session.
 - In a group DM, private channel or channel the app is in, it hears only messages that mention it, and replies in threads it runs. A mention starts a session in the thread it is in (its own thread, or the thread it replies in), and the mention is left out of the text the agent gets. Other chatter is ignored.
+- The agent gets each Slack message as `[<name> <@id>]: <text>`, and a session's first message opens with a note that it is a Slack app, where the thread is (DM, group DM and who is in it, or #channel), and that its replies are Slack messages. Thread commands (`!model`, `/stop`, ...) are not framed.
 - Only users in `MAINPLANE_SLACK_USERS` are heard; with `*`, so is every full member of the workspace (checked with `users.info`, cached ten minutes). A reply also sent to the DM counts.
 - Status, quotes, job lines, files, `attach:`, Retry, the model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched.
 - The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends. A failed step marks the agent session suspended.

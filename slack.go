@@ -37,22 +37,23 @@ type slackChat struct {
 	members bool            // "*" in MAINPLANE_SLACK_USERS: also every full member of the bot's workspace
 	team    string          // the bot's workspace
 	self    string          // the bot's own Slack user
+	name    string          // the bot's own name, as the agent is told it
 	mention *regexp.Regexp  // the bot's mention in a message's text
 	work    chan func()     // the events' work, done in order by one goroutine
 
 	mu         sync.Mutex
 	processing map[string]time.Time // thread -> when Slack was last told it is processing
-	member     map[string]checked   // user -> whether a full member, when "*" is on
+	people     map[string]person    // user -> profile, cached for allowed and names
 }
 
-// checked is a cached answer to whether a user is a full member.
-type checked struct {
-	ok bool
+// person is a cached Slack profile.
+type person struct {
+	u  *slack.User
 	at time.Time
 }
 
 func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
-	s := &slackChat{b: b, users: map[string]bool{}, work: make(chan func(), 256), processing: map[string]time.Time{}, member: map[string]checked{}}
+	s := &slackChat{b: b, users: map[string]bool{}, work: make(chan func(), 256), processing: map[string]time.Time{}, people: map[string]person{}}
 	for _, u := range strings.Split(users, ",") {
 		if u = strings.TrimSpace(u); u == "*" {
 			s.members = true
@@ -67,6 +68,7 @@ func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
 	}
 	s.self = me.UserID
 	s.team = me.TeamID
+	s.name = me.User
 	s.mention = mentionOf(s.self)
 	s.sm = socketmode.New(s.sl)
 	return s
@@ -214,7 +216,9 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		return
 	}
 	if id := s.b.sessionFor(th); id != "" {
-		s.b.message(th, id, m.TimeStamp, text, files)
+		if !s.b.command(th, id, m.TimeStamp, text) {
+			s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, text, false), files)
+		}
 		return
 	}
 	// A reply in a DM's thread that the bot does not run is not for it.
@@ -234,7 +238,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		}
 		return th, nil
 	}
-	if err := s.b.start("slack", open, m.TimeStamp, text, files); err != nil {
+	if err := s.b.start("slack", open, m.TimeStamp, s.framed(m.Channel, m.User, text, true), files); err != nil {
 		s.say(th, msg{Text: err.Error()})
 	}
 }
@@ -563,8 +567,7 @@ func plain(text string) string {
 
 // allowed reports whether the bot takes messages from a Slack user: one listed
 // in MAINPLANE_SLACK_USERS, or with "*" there, any full member of the bot's
-// workspace. Answers from Slack are cached for ten minutes; a failed lookup
-// denies and is retried on the next message.
+// workspace. A failed lookup denies and is retried on the next message.
 func (s *slackChat) allowed(user string) bool {
 	if s.users[user] {
 		return true
@@ -572,22 +575,99 @@ func (s *slackChat) allowed(user string) bool {
 	if !s.members || user == "" {
 		return false
 	}
+	u, err := s.profile(user)
+	return err == nil && fullMember(u, s.team)
+}
+
+// profile is a Slack user's profile, cached for ten minutes.
+func (s *slackChat) profile(user string) (*slack.User, error) {
 	s.mu.Lock()
-	c, ok := s.member[user]
+	p, ok := s.people[user]
 	s.mu.Unlock()
-	if ok && time.Since(c.at) < 10*time.Minute {
-		return c.ok
+	if ok && time.Since(p.at) < 10*time.Minute {
+		return p.u, nil
 	}
 	u, err := s.sl.GetUserInfo(user)
 	if err != nil {
 		log.Printf("users.info %s: %v", user, err)
-		return false
+		return nil, err
 	}
-	c = checked{ok: fullMember(u, s.team), at: time.Now()}
 	s.mu.Lock()
-	s.member[user] = c
+	s.people[user] = person{u: u, at: time.Now()}
 	s.mu.Unlock()
-	return c.ok
+	return u, nil
+}
+
+// display is the name Slack shows for a user, or the id when it is unknown.
+func (s *slackChat) display(user string) string {
+	if u, err := s.profile(user); err == nil {
+		return cmp.Or(u.Profile.DisplayName, u.RealName, u.Name, user)
+	}
+	return user
+}
+
+// framed is a message's text as the agent gets it: who wrote it, so the agent
+// can tell several people apart and mention them, and on a session's first
+// message, that it is a Slack app and where the conversation is.
+func (s *slackChat) framed(channel, user, text string, first bool) string {
+	where := ""
+	if first {
+		where = s.where(channel)
+	}
+	return frame(s.name, where, s.display(user), user, text)
+}
+
+// where describes a conversation: a DM, a group DM and who is in it, or a
+// channel by name.
+func (s *slackChat) where(channel string) string {
+	info, err := s.sl.GetConversationInfo(&slack.GetConversationInfoInput{ChannelID: channel})
+	if err != nil {
+		log.Printf("conversations.info %s: %v", channel, err)
+		return "a Slack conversation"
+	}
+	var names []string
+	if info.IsMpIM {
+		ids, _, err := s.sl.GetUsersInConversation(&slack.GetUsersInConversationParameters{ChannelID: channel, Limit: 50})
+		if err != nil {
+			log.Printf("conversations.members %s: %v", channel, err)
+		}
+		for _, id := range ids {
+			if id != s.self {
+				names = append(names, s.display(id))
+			}
+		}
+	}
+	return describe(info, names)
+}
+
+// describe names a conversation for the agent.
+func describe(info *slack.Channel, names []string) string {
+	switch {
+	case info.IsIM:
+		return "a direct message with you"
+	case info.IsMpIM && len(names) > 0:
+		return "a group DM with " + strings.Join(names, ", ")
+	case info.IsMpIM:
+		return "a group DM"
+	case info.IsPrivate:
+		return "the private channel #" + info.Name
+	default:
+		return "the channel #" + info.Name
+	}
+}
+
+// frame prefixes text with its author and Slack mention. When where is set (a
+// session's first message), a note first tells the agent it is a Slack app,
+// where the thread is, and how its replies show.
+func frame(bot, where, author, user, text string) string {
+	line := "[" + author + " <@" + user + ">]: " + text
+	if where == "" {
+		return line
+	}
+	return "(Note from the Slack bridge: you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
+		". What you write is posted to the thread as Slack messages, so use Slack formatting. Several people may write here; " +
+		"each message starts with its author's name and Slack mention, and writing a mention such as <@" + user +
+		"> notifies that person.)\n\n" + line
 }
 
 // fullMember is a person with a regular account in the given workspace: not a

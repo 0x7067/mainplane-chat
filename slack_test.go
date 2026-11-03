@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/slack-go/slack"
@@ -75,8 +76,47 @@ func TestFullMember(t *testing.T) {
 
 func TestAllowedListedUsersWithoutLookup(t *testing.T) {
 	// Listed users pass, and without "*" nobody else does, with no Slack call (s.sl is nil).
-	s := &slackChat{users: map[string]bool{"U01": true}, member: map[string]checked{}}
+	s := &slackChat{users: map[string]bool{"U01": true}, people: map[string]person{}}
 	if !s.allowed("U01") || s.allowed("U02") || s.allowed("") {
 		t.Error("allowed: listed user must pass, others must not")
+	}
+}
+
+func TestFrame(t *testing.T) {
+	if got, want := frame("symphony", "", "gabrielg", "U07", "hi"), "[gabrielg <@U07>]: hi"; got != want {
+		t.Errorf("later message = %q, want %q", got, want)
+	}
+	first := frame("symphony", "a group DM with pedro, gabrielg", "pedro", "U09", "what can you do")
+	for _, want := range []string{
+		"you are symphony, an app in Slack",
+		"a Slack thread in a group DM with pedro, gabrielg",
+		"Slack formatting",
+		"\n\n[pedro <@U09>]: what can you do",
+	} {
+		if !strings.Contains(first, want) {
+			t.Errorf("first message lacks %q:\n%s", want, first)
+		}
+	}
+}
+
+func TestDescribe(t *testing.T) {
+	ch := func(set func(c *slack.Channel)) *slack.Channel {
+		c := &slack.Channel{}
+		c.Name = "general"
+		set(c)
+		return c
+	}
+	for want, c := range map[string]*slack.Channel{
+		"a direct message with you":    ch(func(c *slack.Channel) { c.IsIM = true }),
+		"a group DM":                   ch(func(c *slack.Channel) { c.IsMpIM = true }),
+		"the private channel #general": ch(func(c *slack.Channel) { c.IsPrivate = true }),
+		"the channel #general":         ch(func(c *slack.Channel) {}),
+	} {
+		if got := describe(c, nil); got != want {
+			t.Errorf("describe = %q, want %q", got, want)
+		}
+	}
+	if got := describe(ch(func(c *slack.Channel) { c.IsMpIM = true }), []string{"a", "b"}); got != "a group DM with a, b" {
+		t.Errorf("describe group DM with names = %q", got)
 	}
 }
