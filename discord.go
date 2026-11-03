@@ -301,8 +301,11 @@ func (d *discord) status(th, id string, t *turn) {
 	}
 	_ = d.dc.ChannelTyping(ch)
 	content := fmt.Sprintf("**working** · started <t:%d:R> · %s", t.start.Unix(), calls(t.calls))
-	for _, l := range t.last {
-		content += "\n-# " + l
+	for _, k := range t.tasks[max(0, len(t.tasks)-2):] {
+		content += "\n-# " + k.title
+		if k.detail != "" {
+			content += ": " + firstWords(k.detail, 120)
+		}
 	}
 	comps := []discordgo.MessageComponent{discordgo.ActionsRow{Components: []discordgo.MessageComponent{
 		discordgo.Button{Label: "Stop", Style: discordgo.SecondaryButton, CustomID: "stop:" + id},

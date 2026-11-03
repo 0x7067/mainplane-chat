@@ -794,8 +794,19 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 	case statefile.Call:
 		t.calls++
 		t.stepCalls++
-		t.last = append(t.last, callLine(r.Body))[max(0, len(t.last)-2):]
+		title, detail := callParts(r.Body)
+		t.tasks = append(t.tasks, task{r.ID, title, detail, "in_progress"})[max(0, len(t.tasks)+1-maxTasks):]
 		t.dirty = true
+	case statefile.Result:
+		for i := range t.tasks {
+			if t.tasks[i].id == r.For {
+				t.tasks[i].status = "complete"
+				if (r.Exit != nil && *r.Exit != 0) || (r.Exit == nil && bytes.HasPrefix(r.Body, []byte("error: "))) {
+					t.tasks[i].status = "error"
+				}
+				t.dirty = true
+			}
+		}
 	}
 }
 
@@ -807,7 +818,7 @@ type turn struct {
 	asked     []string // the chat messages of the turn, to mark done
 	calls     int      // tool calls so far
 	stepCalls int      // calls of the step not yet closed
-	last      []string // the newest call lines
+	tasks     []task   // the newest calls, at most maxTasks
 	text      []string // text of the step not yet closed
 	status    string   // the status message, once posted
 	dirty     bool     // calls the status message does not show yet
@@ -820,7 +831,14 @@ type turn struct {
 	used    int // percent of the context used, or -1
 }
 
-// finish ends the turn: the status message shrinks to one line, and the
+// task is one call of a turn: its tool and worker, its command or path, and
+// its status: in_progress, complete or error.
+type task struct{ id, title, detail, status string }
+
+// maxTasks is the most calls a turn keeps, as many as a Slack plan block holds.
+const maxTasks = 50
+
+// finish ends the turn: the status message says how it went, and the
 // waiting text goes out as a reply to the message that began the turn. A
 // reply after a long turn notifies its author. outcome is "", "failed" or
 // "stopped".
@@ -1130,27 +1148,27 @@ func (b *bridge) do(req *http.Request, out any) error {
 	return json.NewDecoder(resp.Body).Decode(out)
 }
 
-// callLine is one line saying what tool runs where, e.g. "run on admin: ls".
-func callLine(body []byte) string {
+// callParts says what tool runs where, e.g. "run on admin", and on what: the
+// first line of its command, code or path.
+func callParts(body []byte) (title, detail string) {
 	var c struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
 	}
 	if json.Unmarshal(body, &c) != nil {
-		return "working…"
+		return "working…", ""
 	}
-	line := c.Name
+	title = c.Name
 	if w, ok := c.Arguments["worker"].(string); ok {
-		line += " on " + w
+		title += " on " + w
 	}
 	for _, k := range []string{"command", "code", "path"} {
 		if v, ok := c.Arguments[k].(string); ok {
 			first, _, _ := strings.Cut(v, "\n")
-			line += ": " + firstWords(first, 120)
-			break
+			return title, firstWords(first, 200)
 		}
 	}
-	return line
+	return title, ""
 }
 
 // firstWords is s on one line, cut to at most max bytes and a whole rune.
