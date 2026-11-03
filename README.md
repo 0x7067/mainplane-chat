@@ -82,6 +82,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 | `/retry` | step a failed session again |
 | `/stop` | stop the running step |
 | `/info` | show the status, model, workers and context |
+| `/delete` | delete the session for good, as `mainplane delete` does |
 
 ## Details
 
