@@ -8,6 +8,7 @@ A thread follows a session that continues the one it shows, wherever it was made
 - `cont-relay` the new session's replies come back in the thread, from its start.
 - `cont-chain` a continuation of a continuation moves it again.
 - `cont-full` a thread's session that ends at its context limit is continued by the bot, with the last unanswered message passed on; continuations chain.
+- `cont-provider-full` a provider's refusal of a request longer than its window (llama-server `exceed_context_size_error`, OpenAI `context_length_exceeded`) is continued the same way, when its sizes show the history filled the window: the request minus the session's last context used is under half the window. One oversized message keeps Retry.
 
 ## How to get to it (user POV)
 
@@ -26,6 +27,8 @@ reply with the word moved"`. Within about 5 seconds `scripts/thread.sh <thread i
 - **Discord goes on.** In the thread, send `reply with the word here`. `mainplane tail <new id>` shows it `via=discord`.
 
 - **Context full.** Continue the thread's session from the CLI as above, but with `"context_limit":8200` in the config and the message asking to read `main.go` whole (about 5k tokens) and reply in one line. That session overshoots in its last step, which the harness allows. In the thread, send `reply with just the word next`: `thread.sh` shows `⚠️ context N exceeds limit 8200`, `-# continuing in session <id>`, then `next` from the new session, which got the message passed on (`mainplane tail <id>` shows it under "The last message, which it did not answer").
+
+- **Provider full.** Continue as above on a llama-server or OpenAI model, with `context_limit` above the model's window, and fill it the same way. The refusal shows as the error line, then `-# continuing in session <id>` as for Context full. A refusal without sizes, or from one huge message, keeps the Retry button instead. Without such a model, report it skipped; `TestProviderFull` and `TestHistoryOverflow` cover the sizes.
 
 ## Gotchas
 
