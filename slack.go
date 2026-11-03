@@ -23,17 +23,20 @@ import (
 // so again before then.
 const keepProcessing = 50 * time.Minute
 
-// slackChat is the chat adapter for Slack DMs with the app. A top-level DM
-// message starts a session in its thread, which is a Slack agent session:
-// Slack shows its title, its "Working..." state and a Stop button. Its
-// threads are "slack:<dm>/<thread ts>", its channels "slack:<dm>".
+// slackChat is the chat adapter for Slack DMs with the app, and for the group
+// DMs, private channels and channels it is in, where it hears only mentions
+// and replies in its threads. A top-level message starts a session in its
+// thread, which is a Slack agent session: Slack shows its title, its
+// "Working..." state and a Stop button. Its threads are
+// "slack:<channel>/<thread ts>", its channels "slack:<channel>".
 type slackChat struct {
-	b     *bridge
-	sl    *slack.Client
-	sm    *socketmode.Client
-	users map[string]bool // the Slack users the bot takes messages from
-	self  string          // the bot's own Slack user
-	work  chan func()     // the events' work, done in order by one goroutine
+	b       *bridge
+	sl      *slack.Client
+	sm      *socketmode.Client
+	users   map[string]bool // the Slack users the bot takes messages from
+	self    string          // the bot's own Slack user
+	mention *regexp.Regexp  // the bot's mention in a message's text
+	work    chan func()     // the events' work, done in order by one goroutine
 
 	mu         sync.Mutex
 	processing map[string]time.Time // thread -> when Slack was last told it is processing
@@ -50,6 +53,7 @@ func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
 		log.Fatalf("slack: %v", err)
 	}
 	s.self = me.UserID
+	s.mention = mentionOf(s.self)
 	s.sm = socketmode.New(s.sl)
 	return s
 }
@@ -133,14 +137,49 @@ func (s *slackChat) key(ch string) string { return "slack:" + ch }
 
 func (s *slackChat) thread(ch, ts string) string { return "slack:" + ch + "/" + ts }
 
-// threadParts is the DM and thread ts of thread key th.
+// threadParts is the channel and thread ts of thread key th.
 func threadParts(th string) (channel, ts string) {
 	channel, ts, _ = strings.Cut(strings.TrimPrefix(th, "slack:"), "/")
 	return channel, ts
 }
 
+// mentionOf matches the bot's mention in a message's text, <@U…>, with the
+// name Slack may add after a |.
+func mentionOf(self string) *regexp.Regexp {
+	return regexp.MustCompile(`<@` + regexp.QuoteMeta(self) + `(?:\|[^>]*)?>`)
+}
+
+// chatType is the type of a Slack conversation from its id, as a message
+// event names it: "im" for a DM, "group" for a private channel or group DM,
+// "channel" otherwise.
+func chatType(ch string) string {
+	switch {
+	case strings.HasPrefix(ch, "D"):
+		return "im"
+	case strings.HasPrefix(ch, "G"):
+		return "group"
+	}
+	return "channel"
+}
+
+// hears is whether the bot takes a message in a conversation of type chType.
+// Every DM message is for it; in the others, only a message that mentions it
+// or a reply in a thread it runs is, so ordinary chatter never reaches an
+// agent.
+func hears(chType string, mentioned, owned bool) bool {
+	return chType == "im" || mentioned || owned
+}
+
+// handle takes a message event. A top-level message starts a session in its
+// thread, and a reply continues the session its thread shows. In a channel,
+// a message that mentions the bot starts one too, in the thread it is in.
 func (s *slackChat) handle(m *slackevents.MessageEvent) {
-	if m.ChannelType != "im" || !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.SubType) || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
+	if !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.SubType) {
+		return
+	}
+	root := cmp.Or(m.ThreadTimeStamp, m.TimeStamp)
+	th := s.thread(m.Channel, root)
+	if !hears(m.ChannelType, s.mention.MatchString(m.Text), s.b.sessionFor(th) != "") || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
 		return
 	}
 	// A user's message sent through another app, as slack-axi sends them, has
@@ -152,7 +191,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		log.Printf("ignored a message from %s, who is not in MAINPLANE_SLACK_USERS", m.User)
 		return
 	}
-	text := plain(m.Text)
+	text := plain(s.mention.ReplaceAllString(m.Text, ""))
 	var files []file
 	if m.Message != nil {
 		files = s.files(m.Message.Files)
@@ -160,29 +199,29 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	if text == "" && len(files) == 0 {
 		return
 	}
-	if m.ThreadTimeStamp == "" || m.ThreadTimeStamp == m.TimeStamp {
-		th := s.thread(m.Channel, m.TimeStamp)
-		// The thread is the message's; the agent session's title is its first
-		// words, or its first file's name.
-		label := text
-		if label == "" {
-			label = files[0].name // a message with only files
-		}
-		title := firstWords(label, 80)
-		open := func(string) (string, error) {
-			if _, err := s.sl.SetAgentSessionStatus(slack.AgentSessionSetStatusParameters{Status: "processing", ChannelID: m.Channel, ThreadTS: m.TimeStamp, Title: title}); err != nil {
-				log.Printf("session status %s: %v", th, err)
-			}
-			return th, nil
-		}
-		if err := s.b.start("slack", open, m.TimeStamp, text, files); err != nil {
-			s.say(th, msg{Text: err.Error()})
-		}
-		return
-	}
-	th := s.thread(m.Channel, m.ThreadTimeStamp)
 	if id := s.b.sessionFor(th); id != "" {
 		s.b.message(th, id, m.TimeStamp, text, files)
+		return
+	}
+	// A reply in a DM's thread that the bot does not run is not for it.
+	if root != m.TimeStamp && m.ChannelType == "im" {
+		return
+	}
+	// The thread is the message's, or the one it is in; the agent session's
+	// title is its first words, or its first file's name.
+	label := text
+	if label == "" {
+		label = files[0].name // a message with only files
+	}
+	title := firstWords(label, 80)
+	open := func(string) (string, error) {
+		if _, err := s.sl.SetAgentSessionStatus(slack.AgentSessionSetStatusParameters{Status: "processing", ChannelID: m.Channel, ThreadTS: root, Title: title}); err != nil {
+			log.Printf("session status %s: %v", th, err)
+		}
+		return th, nil
+	}
+	if err := s.b.start("slack", open, m.TimeStamp, text, files); err != nil {
+		s.say(th, msg{Text: err.Error()})
 	}
 }
 
@@ -203,13 +242,13 @@ func (s *slackChat) files(fs []slack.File) []file {
 	return out
 }
 
-// catchUp handles the messages sent while the bot was down, in the DMs it
-// has seen before: new top-level messages, and new replies in threads whose
-// first message is from the last 30 days. Slack does not send events again
-// once a connection is gone. Reading a DM that fails for a while, as when
-// offline or rate limited, is tried again before any new event is handled:
-// handling only some messages, or a new one, would mark the rest handled.
-// A DM that is gone is forgotten.
+// catchUp handles the messages sent while the bot was down, in the
+// conversations it has seen before: new top-level messages, and new replies
+// in threads whose first message is from the last 30 days. Slack does not
+// send events again once a connection is gone. Reading a conversation that
+// fails for a while, as when offline or rate limited, is tried again before
+// any new event is handled: handling only some messages, or a new one, would
+// mark the rest handled. A conversation that is gone is forgotten.
 func (s *slackChat) catchUp() {
 	s.b.mu.Lock()
 	seen := map[string]string{}
@@ -237,7 +276,7 @@ func (s *slackChat) catchUp() {
 		slices.SortFunc(missed, func(x, y slack.Message) int { return strings.Compare(x.Timestamp, y.Timestamp) })
 		for _, m := range missed {
 			s.handle(&slackevents.MessageEvent{
-				Channel: ch, ChannelType: "im", User: m.User, Text: m.Text, SubType: m.SubType,
+				Channel: ch, ChannelType: chatType(ch), User: m.User, Text: m.Text, SubType: m.SubType,
 				TimeStamp: m.Timestamp, ThreadTimeStamp: m.ThreadTimestamp, Message: &m.Msg,
 			})
 		}
@@ -245,7 +284,7 @@ func (s *slackChat) catchUp() {
 	log.Print("slack caught up")
 }
 
-// missed is the messages in DM ch after ts after that catchUp handles.
+// missed is the messages in conversation ch after ts after that catchUp handles.
 func (s *slackChat) missed(ch, after string) ([]slack.Message, error) {
 	var missed []slack.Message
 	cutoff := fmt.Sprintf("%d.000000", time.Now().Add(-30*24*time.Hour).Unix())
