@@ -51,6 +51,10 @@ func (c *console) say(th string, m msg) {
 }
 
 func (c *console) status(th, id string, t *turn) {
+	if t.done && t.status == "" {
+		return // as in Slack: a turn with no calls has no status message
+	}
+	t.status = "console" // the status message exists from here on, as Slack's does once posted
 	s := consoleStatus(id, t)
 	c.mu.Lock()
 	same := s == c.last
@@ -61,14 +65,12 @@ func (c *console) status(th, id string, t *turn) {
 	}
 }
 
-// consoleStatus is a turn's status as Slack shows it: the title, then, once
-// the turn is done, each call with its plan status.
+// consoleStatus is a turn's status as Slack shows it: the title, then each
+// call with its plan status.
 func consoleStatus(id string, t *turn) string {
 	s := "status: " + planTitle(id, t)
-	if t.done {
-		for _, k := range t.tasks {
-			s += "\n  " + string(taskStatus(t, k)) + " " + k.title
-		}
+	for _, k := range t.tasks {
+		s += "\n  " + string(taskStatus(t, k)) + " " + k.title
 	}
 	return s
 }
@@ -97,6 +99,7 @@ func runConsole(b *bridge, session string, wait time.Duration) {
 			log.Fatalf("session %s: %v", session, err)
 		}
 		b.bind(consoleThread, session, i.N)
+		b.follow(consoleThread, session, i.N) // what the session does next prints too
 	}
 	in := bufio.NewScanner(os.Stdin)
 	in.Buffer(make([]byte, 1<<20), 1<<20)
@@ -114,6 +117,9 @@ func runConsole(b *bridge, session string, wait time.Duration) {
 		if err := b.start("console", open, key, "", text, nil); err != nil {
 			c.say(consoleThread, msg{Text: err.Error()})
 		}
+	}
+	if err := in.Err(); err != nil {
+		log.Fatalf("console: reading input: %v", err) // a cut-off input must not pass for a complete try
 	}
 	for end := time.Now().Add(wait); ; time.Sleep(time.Second) {
 		id := b.sessionFor(consoleThread)

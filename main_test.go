@@ -238,12 +238,18 @@ func TestFresh(t *testing.T) {
 }
 
 func TestConsoleStatus(t *testing.T) {
-	working := &turn{calls: 2}
-	if got := consoleStatus("s1", working); got != "status: Working · 2 calls" {
+	working := &turn{calls: 1, tasks: []task{{title: "run admin", status: "in_progress"}}}
+	if got := consoleStatus("s1", working); got != "status: Working · 1 call\n  in_progress run admin" {
 		t.Errorf("working = %q", got)
 	}
 	done := &turn{calls: 1, done: true, took: 19 * time.Second, used: -1, tasks: []task{{title: "run admin", status: "complete"}}}
 	if got := consoleStatus("s1", done); got != "status: Done · 1 call · 19s · s1\n  complete run admin" {
 		t.Errorf("done = %q", got)
+	}
+	var out strings.Builder
+	c := &console{out: &out}
+	c.status(consoleThread, "s1", &turn{done: true, took: time.Second, used: -1})
+	if out.Len() != 0 {
+		t.Errorf("a turn with no calls printed %q; Slack posts no status for it", out.String())
 	}
 }

@@ -508,7 +508,7 @@ func (b *bridge) watchSessions() {
 			b.mu.Lock()
 			since := b.st.MirrorSince
 			b.mu.Unlock()
-			if b.dc == nil || from == "discord" || from == "slack" || moved[in.ID] || !in.Created.After(since) {
+			if b.dc == nil || from == "discord" || from == "slack" || from == "console" || moved[in.ID] || !in.Created.After(since) {
 				checked[in.ID] = true
 				continue
 			}
