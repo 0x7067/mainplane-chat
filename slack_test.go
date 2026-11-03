@@ -34,20 +34,20 @@ func TestChatType(t *testing.T) {
 
 func TestHears(t *testing.T) {
 	for _, c := range []struct {
-		chType                 string
-		mentioned, owned, want bool
+		chType          string
+		mentioned, want bool
 	}{
-		{"im", false, false, true},
-		{"im", false, true, true},
-		{"group", true, false, true},
-		{"channel", true, false, true},
-		{"group", false, true, true},
-		{"channel", false, true, true},
-		{"channel", false, false, false},
-		{"group", false, false, false},
+		{"im", false, true},
+		{"im", true, true},
+		{"mpim", true, true},
+		{"group", true, true},
+		{"channel", true, true},
+		{"mpim", false, false}, // a reply in the bot's own thread without a mention, too
+		{"group", false, false},
+		{"channel", false, false},
 	} {
-		if got := hears(c.chType, c.mentioned, c.owned); got != c.want {
-			t.Errorf("hears(%q, mentioned=%v, owned=%v) = %v, want %v", c.chType, c.mentioned, c.owned, got, c.want)
+		if got := hears(c.chType, c.mentioned); got != c.want {
+			t.Errorf("hears(%q, mentioned=%v) = %v, want %v", c.chType, c.mentioned, got, c.want)
 		}
 	}
 }

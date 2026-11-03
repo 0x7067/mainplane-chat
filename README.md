@@ -18,7 +18,7 @@
 
 ## Features
 
-- **A thread per session.** A message in a channel (Discord), or a DM or a mention of the app in a Slack channel or group DM, starts a session in a thread. Replies in the thread continue it.
+- **A thread per session.** A message in a channel (Discord), or a DM or a mention of the app in a Slack channel or group DM, starts a session in a thread. Replies in the thread continue it (in a Slack channel or group DM, only replies that mention the app).
 - **Live status.** One message shows the running turn: its time, its last tool calls and a Stop button. When the turn ends, it shrinks to one line: `14 calls · 2m31s · 38% context`.
 - **Files in both directions.** Send images and text files with a message. The agent sends a file back with a line `attach: /path/to/file` in its reply.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
@@ -105,7 +105,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 <summary>Slack</summary>
 
 - A top-level DM to the app starts a session in its thread, which is a Slack agent session. Slack shows its title (the first words, then the session's name), its working state and a Stop button. A title changed in Slack names the session.
-- In a group DM, private channel or channel the app is in, it hears only messages that mention it, and replies in threads it runs. A mention starts a session in the thread it is in (its own thread, or the thread it replies in), and the mention is left out of the text the agent gets. Other chatter is ignored.
+- In a group DM, private channel or channel the app is in, it hears only messages that mention it, in its own threads too, so people can talk there without the agent answering each message. A mention in a thread it runs continues that session; elsewhere it starts one in the thread it is in (its own thread, or the thread it replies in). The mention is left out of the text the agent gets. Other chatter is ignored.
 - The agent gets each Slack message as `[<name> <@id>]: <text>`, and a session's first message opens with a note that it is a Slack app, where the thread is (DM, group DM and who is in it, or #channel), and that its replies are Slack messages. Thread commands (`!model`, `/stop`, ...) are not framed.
 - Only users in `MAINPLANE_SLACK_USERS` are heard; with `*`, so is every full member of the workspace (checked with `users.info`, cached ten minutes). A reply also sent to the DM counts.
 - Status, quotes, job lines, files, `attach:`, Retry, the model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched.
