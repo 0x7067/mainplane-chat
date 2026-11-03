@@ -58,8 +58,10 @@ type bridge struct {
 	chats   map[string]chat // platform -> its adapter; the platform is also the via of its messages
 
 	mu        sync.Mutex
-	following map[string]bool   // session ids with a follower running
-	renames   map[string]*title // thread -> the title it waits for, while its renamer runs
+	following map[[2]string]bool // thread and session pairs with a follower running
+	full      map[string]bool    // full sessions a thread has continued
+	sentIn    map[string]string  // chat message -> the thread that sent it to a session
+	renames   map[string]*title  // thread -> the title it waits for, while its renamer runs
 	st        state
 }
 
@@ -127,7 +129,9 @@ func main() {
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
 		path:      statePath(),
-		following: map[string]bool{},
+		following: map[[2]string]bool{},
+		full:      map[string]bool{},
+		sentIn:    map[string]string{},
 		renames:   map[string]*title{},
 	}
 	b.load()
@@ -271,8 +275,9 @@ func (b *bridge) newConf() (statefile.Conf, error) {
 
 // continueIn is /continue, and /model with a model: a new session with this
 // one's config, or the model's and this one's workers, told to carry on from
-// this one, as the terminal app does. The thread then shows the new session,
-// from before its first message, so the watch does not move it again.
+// this one, as the terminal app does. The thread, and every other thread that
+// showed this one, then show the new session, from before its first message,
+// so the watch does not move them again.
 func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) {
 	cur, err := b.info(old)
 	if err != nil {
@@ -297,6 +302,10 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 	}
 	b.bind(th, id, 0)
 	b.say(th, msg{Note: "continuing in session " + id + " on " + conf.Model})
+	for _, o := range b.threadsShowing(old) {
+		b.follow(o, id, 0)
+		b.say(o, msg{Note: "continued in session " + id})
+	}
 	m := continuePrefix + old + ". Retrieve key context from it as you go."
 	if text != "" {
 		m += "\n" + text
@@ -318,8 +327,16 @@ const fullKey = "context-full-"
 // continueFull is /continue, run by the bot when the thread's session ends
 // at its context limit (error record n), as Mainplane intends a full session
 // to go on. The new session gets the last message the full one did not
-// answer, so it answers what was just asked.
+// answer, so it answers what was just asked. Of the threads that show the
+// session, only the first to get here continues it; the others follow.
 func (b *bridge) continueFull(th, id string, n int) {
+	b.mu.Lock()
+	taken := b.full[id]
+	b.full[id] = true
+	b.mu.Unlock()
+	if taken {
+		return
+	}
 	text := "The session before ran out of context. Carry on where it stopped."
 	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
 		if m := lastUnanswered(recs); m != "" {
@@ -610,6 +627,9 @@ func (b *bridge) post(th, id, msgID, text string, files []file) {
 	req, _ := http.NewRequest("POST", b.harness+"/sessions/"+id+"/records?via="+platform(th), &body)
 	req.Header.Set("Content-Type", ctype)
 	req.Header.Set("Idempotency-Key", msgID)
+	b.mu.Lock()
+	b.sentIn[msgID] = th // before the send, as the thread's follower may relay it first
+	b.mu.Unlock()
 	var out struct{ N int }
 	if err := b.do(req, &out); err != nil {
 		b.say(th, msg{Text: "send failed: " + err.Error()})
@@ -684,14 +704,15 @@ func (b *bridge) resume(th, id string) {
 func (b *bridge) follow(th, id string, n int) {
 	b.bind(th, id, n)
 	b.mu.Lock()
-	running := b.following[id]
-	b.following[id] = true
+	k := [2]string{th, id}
+	running := b.following[k]
+	b.following[k] = true
 	b.mu.Unlock()
 	if running {
 		return
 	}
 	go func() {
-		defer func() { b.mu.Lock(); delete(b.following, id); b.mu.Unlock() }()
+		defer func() { b.mu.Lock(); delete(b.following, k); b.mu.Unlock() }()
 		var t turn
 		for {
 			// Calls not shown yet, held back by the status throttle, show after a
@@ -751,8 +772,12 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.finish(th, id, t, "")
 		}
 	case statefile.Message:
-		// A message the thread sent: the turn's reply answers it.
-		if r.Via == platform(th) && r.IdempotencyKey != "" && !strings.HasPrefix(r.IdempotencyKey, fullKey) && r.IdempotencyKey != t.key {
+		// A message the thread sent: the turn's reply answers it. One sent
+		// from another thread of the same chat is quoted, as from elsewhere.
+		b.mu.Lock()
+		mine := r.Via == platform(th) && b.sentIn[r.IdempotencyKey] == th
+		b.mu.Unlock()
+		if mine && r.IdempotencyKey != "" && !strings.HasPrefix(r.IdempotencyKey, fullKey) && r.IdempotencyKey != t.key {
 			t.key = r.IdempotencyKey
 			t.asked = append(t.asked, r.IdempotencyKey)
 		}
@@ -761,7 +786,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		switch {
 		case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Note: jobLine(string(r.Body))})
-		case r.Via != platform(th) && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
+		case !mine && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
 		}
 	case statefile.Name:
