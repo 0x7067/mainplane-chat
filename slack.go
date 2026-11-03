@@ -543,7 +543,20 @@ func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) er
 // title says how the turn went, with the session id, which Slack's title does
 // not show.
 func (s *slackChat) status(th, id string, t *turn) {
+	busy := s.b.busyCount()
+	busyTag := ""
+	if busy > 0 {
+		busyTag = " · " + strconv.Itoa(busy) + " other"
+		if busy == 1 {
+			busyTag += " session"
+		} else {
+			busyTag += " sessions"
+		}
+	}
 	title := planTitle(id, t)
+	if !t.done {
+		title += busyTag
+	}
 	current := s.b.shows(th, id)
 	if t.done {
 		// The agent session is ready for the next message.
