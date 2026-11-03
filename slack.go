@@ -453,20 +453,13 @@ func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) {
 // title says how the turn went, with the session id, which Slack's title does
 // not show.
 func (s *slackChat) status(th, id string, t *turn) {
-	title := "Working · " + calls(t.calls)
+	title := planTitle(id, t)
 	if t.done {
 		// The agent session is ready for the next message.
 		s.setStatus(th, "active")
 		if t.status == "" {
 			return
 		}
-		title = fmt.Sprintf("Done · %s · %s", calls(t.calls), t.took)
-		if t.outcome != "" {
-			title = fmt.Sprintf("%s after %s · %s", strings.ToUpper(t.outcome[:1])+t.outcome[1:], calls(t.calls), t.took)
-		} else if t.used >= 0 {
-			title += fmt.Sprintf(" · %d%% context", t.used)
-		}
-		title += " · " + id
 	} else {
 		s.mu.Lock()
 		stale := time.Since(s.processing[th]) > keepProcessing
@@ -477,15 +470,7 @@ func (s *slackChat) status(th, id string, t *turn) {
 	}
 	tasks := make([]*slack.TaskCardBlock, len(t.tasks))
 	for i, k := range t.tasks {
-		status := slack.TaskCardStatus(k.status)
-		if t.done && status == slack.TaskCardStatusInProgress {
-			// A call left open by a failure or a stop failed with it; one left
-			// open when the session filled up has no result: pending.
-			status = slack.TaskCardStatusError
-			if t.outcome == "continued" {
-				status = slack.TaskCardStatusPending // no result: not done, not failed
-			}
-		}
+		status := taskStatus(t, k)
 		tasks[i] = slack.NewTaskCardBlock(k.id, k.title).WithStatus(status)
 		if k.detail != "" {
 			tasks[i].WithDetails(slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement(k.detail, &slack.RichTextSectionTextStyle{Code: true}))))
@@ -504,6 +489,36 @@ func (s *slackChat) status(th, id string, t *turn) {
 	if err != nil {
 		log.Printf("status %s: %v", id, err)
 	}
+}
+
+// planTitle is the title of a turn's status message: working with its calls,
+// or how it ended, with the session id, which Slack's title does not show.
+// The console prints it as is, so it shows what Slack shows.
+func planTitle(id string, t *turn) string {
+	if !t.done {
+		return "Working · " + calls(t.calls)
+	}
+	title := fmt.Sprintf("Done · %s · %s", calls(t.calls), t.took)
+	if t.outcome != "" {
+		title = fmt.Sprintf("%s after %s · %s", strings.ToUpper(t.outcome[:1])+t.outcome[1:], calls(t.calls), t.took)
+	} else if t.used >= 0 {
+		title += fmt.Sprintf(" · %d%% context", t.used)
+	}
+	return title + " · " + id
+}
+
+// taskStatus is how a call shows in the status message's plan.
+func taskStatus(t *turn, k task) slack.TaskCardStatus {
+	status := slack.TaskCardStatus(k.status)
+	if t.done && status == slack.TaskCardStatusInProgress {
+		// A call left open by a failure or a stop failed with it; one left
+		// open when the session filled up has no result: pending.
+		status = slack.TaskCardStatusError
+		if t.outcome == "continued" {
+			status = slack.TaskCardStatusPending // no result: not done, not failed
+		}
+	}
+	return status
 }
 
 // react marks message msgID: seen sets the agent session processing, which
