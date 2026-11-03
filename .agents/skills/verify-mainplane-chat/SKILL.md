@@ -40,7 +40,7 @@ cp -p "$MPC_BIN" "$MPC_BIN.prev"
 go build -o "$MPC_BIN" . && mpc_stop && mpc_start
 ```
 
-Ready when `mpc_log_since_start` shows `caught up`. Teardown: restore `$MPC_BIN.prev`, then `mpc_stop && mpc_start`, if the change is not being kept. Before any of it, try the build with `-console` (README, "Trying a build").
+Ready when `mpc_log_since_start` shows `caught up`. Teardown, if the change is not being kept: `mpc_stop && cp -p "$MPC_BIN.prev" "$MPC_BIN" && mpc_start` (stop first: Linux refuses to overwrite a running binary, "Text file busy"). Before any of it, try the build with `-console` (README, "Trying a build").
 
 ## Doctor
 

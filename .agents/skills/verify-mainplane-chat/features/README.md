@@ -7,6 +7,7 @@ The user-facing behavior of the mainplane-chat bot, one file per feature. Read t
 - The build under test is running: `scripts/doctor.sh` passes from the checkout it was built from.
 - The tester bot is in the guild, `~/.config/mainplane-chat/tester.env` holds its token, and the bot's env sets `MAINPLANE_DISCORD_TESTER` to its user id.
 - `#bot-test` exists in the test guild. Every test message goes there or in threads under it.
+- A deployment runs Discord, Slack or both (`DISCORD_TOKEN`, `SLACK_BOT_TOKEN` in its env). Skip the recipes of a chat it does not run, and report the skip. For Slack, `scripts/slack-config.sh` says which recipes run on its app and what to expect.
 - At least one provider is connected (`mainplane providers` on the server).
 
 ## Driving conventions
@@ -31,3 +32,4 @@ The user-facing behavior of the mainplane-chat bot, one file per feature. Read t
 - [mirroring.md](mirroring.md): a session made outside Discord gets a thread in #sessions.
 - [catch-up.md](catch-up.md): what happened while the bot was down is picked up.
 - [slack.md](slack.md): the main features in a Slack DM, typed as the user.
+- [console.md](console.md): `-console`, a build tried in the terminal against the harness.
