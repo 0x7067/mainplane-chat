@@ -5,7 +5,20 @@ description: Drive the mainplane-chat bot the way its user does, by typing in Di
 
 # Verify mainplane-chat
 
-The live bot runs on the harness machine, the M4 Mac (`ssh pedrostestm4@Inventory-MYFQJGWG95`), as the user LaunchAgent `local.mainplane-chat` (`~/Library/LaunchAgents/local.mainplane-chat.plist`), from `~/.local/bin/mainplane-chat`. It talks to the Mainplane harness at `http://127.0.0.1:8080`. Its env sets Slack tokens and no Discord token, so the Discord steps below do not apply there unless a Discord bot is added. A user drives the bot by typing in a private Discord server (or Slack on the M4). Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
+Verify on a host that runs the bot and has the tester. A user drives the bot by typing in a private Discord server (or Slack). Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
+
+## Deployment
+
+This repo does not know where the bot runs. Each host that runs it describes its deployment in `~/.config/mainplane-chat/deploy.sh`, a bash file kept with that host's setup (not here), which the scripts and steps below source:
+
+| Name | What it is |
+| --- | --- |
+| `MPC_BIN` | the binary the service runs; builds go there with `go build -o "$MPC_BIN" .` |
+| `mpc_running` | exits 0 while the service runs |
+| `mpc_start`, `mpc_stop` | start and stop the service (stop must hold: a supervisor that restarts a killed process needs its own stop) |
+| `mpc_log_since_start` | prints the bot's log since the running process started |
+
+A systemd user service, for example: `MPC_BIN=$HOME/go/bin/mainplane-chat`, `mpc_running() { systemctl --user is-active -q mainplane-chat; }`, `mpc_start`/`mpc_stop` with `systemctl --user start|stop`, `mpc_log_since_start() { journalctl --user -u mainplane-chat -o cat --no-pager --since "$(systemctl --user show -p ActiveEnterTimestamp --value mainplane-chat)"; }`.
 
 | Thing | Value |
 | --- | --- |
@@ -14,7 +27,6 @@ The live bot runs on the harness machine, the M4 Mac (`ssh pedrostestm4@Inventor
 | Bot user | `scripts/discord.sh /users/@me` |
 | Tester | `~/.config/mainplane-chat/tester.env`, mode 600: `TESTER_TOKEN=` its token, `SLACK_DM=` the user's DM channel with the Slack app |
 | State file | `~/.local/state/mainplane-chat/state.json` on the server |
-| Logs | `~/Library/Logs/mainplane-chat.log` on the server (the LaunchAgent's stdout and stderr); on systemd, `journalctl --user -u mainplane-chat` |
 
 The helpers in `scripts/` run on the server, from a checkout of this repo.
 
@@ -23,15 +35,16 @@ The helpers in `scripts/` run on the server, from a checkout of this repo.
 Build the branch under test and swap it in; keep the previous binary to restore.
 
 ```sh
-cp -p ~/.local/bin/mainplane-chat ~/.local/bin/mainplane-chat.prev
-go build -o ~/.local/bin/mainplane-chat . && launchctl kickstart -k gui/$(id -u)/local.mainplane-chat
+. ~/.config/mainplane-chat/deploy.sh
+cp -p "$MPC_BIN" "$MPC_BIN.prev"
+go build -o "$MPC_BIN" . && mpc_stop && mpc_start
 ```
 
-Ready when the log shows `caught up` after the restart. Teardown: restore `.prev` and kickstart again, if the change is not being kept. On a systemd host, the same steps use `~/go/bin/mainplane-chat` and `systemctl --user restart mainplane-chat`.
+Ready when `mpc_log_since_start` shows `caught up`. Teardown: restore `$MPC_BIN.prev`, then `mpc_stop && mpc_start`, if the change is not being kept. Before any of it, try the build with `-console` (README, "Trying a build").
 
 ## Doctor
 
-`scripts/doctor.sh` (read-only) checks the LaunchAgent and its log file on macOS (the M4), and `systemctl --user` and `journalctl` elsewhere. It checks that the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
+`scripts/doctor.sh` (read-only) checks, through the host's `deploy.sh`, that the service runs, the bot caught up since it started, the binary was built from this checkout's HEAD, the harness answers, and the state file parses.
 
 ## Drive
 
@@ -48,11 +61,11 @@ A message in `#bot-test` starts a session and a thread on that message; `thread.
 
 ## Evidence
 
-For each feature driven, keep: the messages typed (time, text), `scripts/thread.sh` output after, the journal lines for the run, the state file's entry for the thread (`jq '.threads["discord:<thread id>"]'`), and `mainplane info` of each session involved. Put them under `/tmp/verify-mainplane-chat/<run>/` on the server.
+For each feature driven, keep: the messages typed (time, text), `scripts/thread.sh` output after, the bot's log for the run (`mpc_log_since_start`), the state file's entry for the thread (`jq '.threads["discord:<thread id>"]'`), and `mainplane info` of each session involved. Put them under `/tmp/verify-mainplane-chat/<run>/` on the server.
 
 ## Cleanup
 
-Delete only what the run made: its test sessions (`mainplane delete <id>`, after saving evidence) and its threads (archive from Discord). Keep `#bot-test`. Restore `~/go/bin/mainplane-chat.prev` if the build under test is not being kept. Leave `MAINPLANE_DISCORD_TESTER` set: it only lets the tester in.
+Delete only what the run made: its test sessions (`mainplane delete <id>`, after saving evidence) and its threads (archive from Discord). Keep `#bot-test`. Restore `$MPC_BIN.prev` if the build under test is not being kept. Leave `MAINPLANE_DISCORD_TESTER` set: it only lets the tester in.
 
 ## Features
 
