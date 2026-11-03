@@ -31,3 +31,4 @@ The user-facing behavior of the mainplane-chat bot, one file per feature. Read t
 - [mirroring.md](mirroring.md): a session made outside Discord gets a thread in #sessions.
 - [catch-up.md](catch-up.md): what happened while the bot was down is picked up.
 - [slack.md](slack.md): the main features in a Slack DM, typed as the user.
+- [console.md](console.md): `-console`, a build tried in the terminal against the harness.
