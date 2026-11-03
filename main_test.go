@@ -202,3 +202,11 @@ func TestHistoryOverflow(t *testing.T) {
 		}
 	}
 }
+
+func TestReaction(t *testing.T) {
+	for outcome, want := range map[string]string{"": done, "failed": failed, "stopped": failed, "continued": ""} {
+		if got := reaction(outcome); got != want {
+			t.Errorf("reaction(%q) = %q, want %q", outcome, got, want)
+		}
+	}
+}

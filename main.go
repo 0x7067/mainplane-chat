@@ -843,14 +843,18 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.rename(th, id, string(r.Body))
 		}
 	case statefile.Error:
+		full := r.Via == "" && b.shows(th, id) && b.endedFull(id, string(r.Body))
 		outcome := "failed"
-		if r.Via != "" { // who stopped it
+		switch {
+		case r.Via != "": // who stopped it
 			outcome = "stopped"
+		case full: // not a failure: the turn goes on in a new session
+			outcome = "continued"
 		}
 		b.finish(th, id, t, outcome)
 		text := "⚠️ " + string(r.Body)
 		switch {
-		case b.shows(th, id) && b.endedFull(id, string(r.Body)):
+		case full:
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
 			b.continueFull(th, id, r.N)
@@ -898,7 +902,7 @@ type turn struct {
 
 	// Set when the turn is done, for its last status.
 	done    bool
-	outcome string // "", "failed" or "stopped"
+	outcome string // "", "failed", "stopped" or "continued"
 	took    time.Duration
 	used    int // percent of the context used, or -1
 }
@@ -912,8 +916,8 @@ const maxTasks = 50
 
 // finish ends the turn: the status message says how it went, and the
 // waiting text goes out as a reply to the message that began the turn. A
-// reply after a long turn notifies its author. outcome is "", "failed" or
-// "stopped".
+// reply after a long turn notifies its author. outcome is "", "failed",
+// "stopped" or "continued" (the session was full and goes on in a new one).
 func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	took := time.Since(t.start).Round(time.Second)
 	t.done, t.outcome, t.took, t.used = true, outcome, took, -1
@@ -925,15 +929,27 @@ func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	b.chat(th).status(th, id, t)
 	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	*t = turn{}
-	result := done
-	if outcome != "" {
-		result = failed
-	}
-	for _, m := range asked {
-		b.chat(th).react(th, m, result)
+	if result := reaction(outcome); result != "" {
+		for _, m := range asked {
+			b.chat(th).react(th, m, result)
+		}
 	}
 	if text != "" {
 		b.reply(th, text, key, took > 2*time.Minute)
+	}
+}
+
+// reaction is the mark a turn's messages get when it ends: done, failed for a
+// failure or a stop, and none when it is continued in a new session, since
+// that is not where it ends.
+func reaction(outcome string) string {
+	switch outcome {
+	case "":
+		return done
+	case "continued":
+		return ""
+	default:
+		return failed
 	}
 }
 
