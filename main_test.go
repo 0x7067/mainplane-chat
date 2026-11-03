@@ -253,3 +253,15 @@ func TestConsoleStatus(t *testing.T) {
 		t.Errorf("a turn with no calls printed %q; Slack posts no status for it", out.String())
 	}
 }
+
+func TestLogLines(t *testing.T) {
+	got := logLines("a35d9dea", []statefile.Worker{{Name: "admin"}, {Name: "gone"}, {Name: "inventory-lj69443nvl"}},
+		map[string]string{"admin": "/Users/pedrostestm4/.mainplane", "inventory-lj69443nvl": "/Users/pedrostest/.mainplane"})
+	want := []string{"/Users/pedrostestm4/.mainplane/logs/a35d9dea.log on admin", "/Users/pedrostest/.mainplane/logs/a35d9dea.log on inventory-lj69443nvl"}
+	if !slices.Equal(got, want) {
+		t.Errorf("logLines = %v, want %v", got, want)
+	}
+	if continued(continuePrefix+"a35d9dea. Retrieve key context from it as you go. Its log: "+want[0]+".") != "a35d9dea" {
+		t.Error("continued no longer reads the session id from a message that names its log")
+	}
+}
