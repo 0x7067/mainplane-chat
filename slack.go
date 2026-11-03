@@ -9,6 +9,7 @@ import (
 	"log"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -389,29 +390,26 @@ func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) {
 	}
 }
 
-// status posts or edits the turn's status message: when it started, in a
-// date Slack shows in the reader's time zone, and the newest calls. Done, it
-// shrinks to one line with the session id, which Slack's title does not show.
+// status posts or edits the turn's status message: a plan block with a task
+// for each call, which shows whether it runs, is done or failed. Done, its
+// title says how the turn went, with the session id, which Slack's title does
+// not show.
 func (s *slackChat) status(th, id string, t *turn) {
-	var text string
+	title := "Working · " + calls(t.calls)
 	if t.done {
 		// The agent session is ready for the next message.
 		s.setStatus(th, "active")
 		if t.status == "" {
 			return
 		}
-		text = fmt.Sprintf("`%s` · %s · %s", id, calls(t.calls), t.took)
+		title = fmt.Sprintf("Done · %s · %s", calls(t.calls), t.took)
 		if t.outcome != "" {
-			text = fmt.Sprintf("`%s` · %s after %s · %s", id, t.outcome, calls(t.calls), t.took)
+			title = fmt.Sprintf("%s after %s · %s", strings.ToUpper(t.outcome[:1])+t.outcome[1:], calls(t.calls), t.took)
 		} else if t.used >= 0 {
-			text += fmt.Sprintf(" · %d%% context", t.used)
+			title += fmt.Sprintf(" · %d%% context", t.used)
 		}
+		title += " · " + id
 	} else {
-		lines := []string{fmt.Sprintf("*working* · started <!date^%d^{time}|%s> · %s", t.start.Unix(), t.start.Format(time.Kitchen), calls(t.calls))}
-		for _, l := range t.last {
-			lines = append(lines, "`"+escape(strings.ReplaceAll(l, "`", "'"))+"`")
-		}
-		text = strings.Join(lines, "\n")
 		s.mu.Lock()
 		stale := time.Since(s.processing[th]) > keepProcessing
 		s.mu.Unlock()
@@ -419,11 +417,21 @@ func (s *slackChat) status(th, id string, t *turn) {
 			s.setStatus(th, "processing")
 		}
 	}
-	channel, ts := threadParts(th)
-	opts := []slack.MsgOption{
-		slack.MsgOptionText(text, false),
-		slack.MsgOptionBlocks(slack.NewContextBlock("", slack.NewTextBlockObject(slack.MarkdownType, text, false, false))),
+	tasks := make([]*slack.TaskCardBlock, len(t.tasks))
+	for i, k := range t.tasks {
+		status := slack.TaskCardStatus(k.status)
+		if t.done && status == slack.TaskCardStatusInProgress {
+			status = slack.TaskCardStatusError
+		}
+		tasks[i] = slack.NewTaskCardBlock(k.id, k.title).WithStatus(status)
+		if k.detail != "" {
+			tasks[i].WithDetails(slack.NewRichTextBlock("", slack.NewRichTextSection(slack.NewRichTextSectionTextElement(k.detail, &slack.RichTextSectionTextStyle{Code: true}))))
+		}
 	}
+	// Slack wants a new block id each time a message changes.
+	plan := slack.NewPlanBlock(title, slack.PlanBlockOptionBlockID(strconv.FormatInt(time.Now().UnixNano(), 36))).WithTasks(tasks...)
+	channel, ts := threadParts(th)
+	opts := []slack.MsgOption{slack.MsgOptionText(title, false), slack.MsgOptionBlocks(plan)}
 	var err error
 	if t.status == "" {
 		_, t.status, err = s.sl.PostMessage(channel, append(opts, slack.MsgOptionTS(ts))...)
@@ -498,9 +506,4 @@ func plain(text string) string {
 		return s[1]
 	})
 	return strings.TrimSpace(html.UnescapeString(text))
-}
-
-// escape makes text safe in Slack mrkdwn.
-func escape(text string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(text)
 }
