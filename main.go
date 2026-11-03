@@ -855,6 +855,11 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		case r.Via != "": // who stopped it
 			outcome = "stopped"
 		case full:
+			// What the full session wrote goes out first, above the notice.
+			if len(t.text) > 0 {
+				b.reply(th, strings.Join(t.text, "\n\n"), t.key, false)
+				t.text = nil
+			}
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
 			if b.continueFull(th, id, r.N) { // not a failure: the turn goes on in a new session
