@@ -63,12 +63,12 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
 | `DISCORD_TOKEN` | the Discord bot token; leave it unset to run Slack only |
 | `SLACK_BOT_TOKEN` | the `xoxb-` token of the Slack app; leave it unset to run Discord only |
 | `SLACK_APP_TOKEN` | the `xapp-` app-level token, with Slack |
-| `MAINPLANE_SLACK_USERS` | with Slack: comma-separated Slack user ids the bot takes messages from |
+| `MAINPLANE_SLACK_USERS` | with Slack: comma-separated Slack user ids the bot takes messages from; `*` adds every full member of the bot's workspace (no guests, Slack Connect users, bots or deactivated accounts) |
 | `MAINPLANE_DISCORD_TESTER` | optional: the user id of a tester bot whose messages the bot takes as a person's, for end-to-end tests. Other bots stay ignored |
 
 The bot keeps its state in `$XDG_STATE_HOME/mainplane-chat/state.json` (`~/.local/state` by default).
 
-**Security:** anyone who can post in the Discord server, or any Slack user in `MAINPLANE_SLACK_USERS`, controls your agents and every worker they reach. Use a private Discord server.
+**Security:** anyone who can post in the Discord server, or any Slack user `MAINPLANE_SLACK_USERS` allows (with `*`, the whole workspace), controls your agents and every worker they reach. Use a private Discord server.
 
 ## Commands
 
@@ -106,7 +106,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 
 - A top-level DM to the app starts a session in its thread, which is a Slack agent session. Slack shows its title (the first words, then the session's name), its working state and a Stop button. A title changed in Slack names the session.
 - In a group DM, private channel or channel the app is in, it hears only messages that mention it, and replies in threads it runs. A mention starts a session in the thread it is in (its own thread, or the thread it replies in), and the mention is left out of the text the agent gets. Other chatter is ignored.
-- Only users in `MAINPLANE_SLACK_USERS` are heard. A reply also sent to the DM counts.
+- Only users in `MAINPLANE_SLACK_USERS` are heard; with `*`, so is every full member of the workspace (checked with `users.info`, cached ten minutes). A reply also sent to the DM counts.
 - Status, quotes, job lines, files, `attach:`, Retry, the model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched.
 - The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends. A failed step marks the agent session suspended.
 - Sessions made in Slack stay in Slack: `#sessions` mirrors only sessions made outside the chats.
