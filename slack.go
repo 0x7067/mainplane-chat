@@ -479,7 +479,12 @@ func (s *slackChat) status(th, id string, t *turn) {
 	for i, k := range t.tasks {
 		status := slack.TaskCardStatus(k.status)
 		if t.done && status == slack.TaskCardStatusInProgress {
+			// A call left open by a failure or a stop failed with it; one left
+			// open when the session filled up has no result: pending.
 			status = slack.TaskCardStatusError
+			if t.outcome == "continued" {
+				status = slack.TaskCardStatusPending // no result: not done, not failed
+			}
 		}
 		tasks[i] = slack.NewTaskCardBlock(k.id, k.title).WithStatus(status)
 		if k.detail != "" {

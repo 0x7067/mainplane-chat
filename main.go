@@ -60,10 +60,11 @@ type bridge struct {
 	chats   map[string]chat // platform -> its adapter; the platform is also the via of its messages
 
 	mu        sync.Mutex
-	following map[[2]string]bool // thread and session pairs with a follower running
-	full      map[string]bool    // full sessions a thread has continued
-	sentIn    map[string]string  // chat message -> the thread that sent it to a session
-	renames   map[string]*title  // thread -> the title it waits for, while its renamer runs
+	following map[[2]string]bool  // thread and session pairs with a follower running
+	full      map[string]bool     // full sessions a thread has continued
+	carried   map[string][]string // thread -> messages of continued turns, marked when its next turn ends
+	sentIn    map[string]string   // chat message -> the thread that sent it to a session
+	renames   map[string]*title   // thread -> the title it waits for, while its renamer runs
 	st        state
 }
 
@@ -134,6 +135,7 @@ func main() {
 		path:      statePath(),
 		following: map[[2]string]bool{},
 		full:      map[string]bool{},
+		carried:   map[string][]string{},
 		sentIn:    map[string]string{},
 		renames:   map[string]*title{},
 	}
@@ -357,6 +359,13 @@ func historyOverflow(body string, used int) bool {
 	return request > 0 && window > 0 && (request-used)*2 < window
 }
 
+// fresh is whether an error is recent enough to continue its session: one
+// replayed when the bot comes back, say after a restart, may be long settled,
+// and continuing it then restarts work nobody is waiting for.
+func fresh(at, now time.Time) bool {
+	return now.Sub(at) < 10*time.Minute
+}
+
 // endedFull is whether a session's error record ends it full, so the bot continues it.
 func (b *bridge) endedFull(id, body string) bool {
 	if contextFull(body) {
@@ -377,14 +386,15 @@ const fullKey = "context-full-"
 // at its context limit (error record n), as Mainplane intends a full session
 // to go on. The new session gets the last message the full one did not
 // answer, so it answers what was just asked. Of the threads that show the
-// session, only the first to get here continues it; the others follow.
-func (b *bridge) continueFull(th, id string, n int) {
+// session, only the first to get here continues it; the others follow. It
+// reports whether the session goes on: continued here, or by another thread.
+func (b *bridge) continueFull(th, id string, n int) bool {
 	b.mu.Lock()
 	taken := b.full[id]
 	b.full[id] = true
 	b.mu.Unlock()
 	if taken {
-		return
+		return true
 	}
 	text := "The session before ran out of context. Carry on where it stopped."
 	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
@@ -394,7 +404,9 @@ func (b *bridge) continueFull(th, id string, n int) {
 	}
 	if _, err := b.continueIn(th, id, fullKey+id, "", text); err != nil {
 		b.say(th, msg{Text: "automatic /continue failed: " + err.Error()})
+		return false
 	}
+	return true
 }
 
 // lastUnanswered is the newest text message, from a person or a connector,
@@ -843,17 +855,27 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.rename(th, id, string(r.Body))
 		}
 	case statefile.Error:
-		outcome := "failed"
-		if r.Via != "" { // who stopped it
-			outcome = "stopped"
-		}
-		b.finish(th, id, t, outcome)
+		full := r.Via == "" && fresh(r.Time, time.Now()) && b.shows(th, id) && b.endedFull(id, string(r.Body))
 		text := "⚠️ " + string(r.Body)
+		outcome := "failed"
 		switch {
-		case b.shows(th, id) && b.endedFull(id, string(r.Body)):
+		case r.Via != "": // who stopped it
+			outcome = "stopped"
+		case full:
+			// What the full session wrote goes out first, above the notice.
+			if len(t.text) > 0 {
+				b.reply(th, strings.Join(t.text, "\n\n"), t.key, time.Since(t.start) > 2*time.Minute)
+				t.text = nil
+			}
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
-			b.continueFull(th, id, r.N)
+			if b.continueFull(th, id, r.N) { // not a failure: the turn goes on in a new session
+				outcome = "continued"
+			}
+		}
+		b.finish(th, id, t, outcome)
+		switch {
+		case full: // said above
 		case r.Via != "": // a stop: on purpose, so no Retry to offer
 			b.say(th, msg{Text: text})
 		default:
@@ -898,7 +920,7 @@ type turn struct {
 
 	// Set when the turn is done, for its last status.
 	done    bool
-	outcome string // "", "failed" or "stopped"
+	outcome string // "", "failed", "stopped" or "continued"
 	took    time.Duration
 	used    int // percent of the context used, or -1
 }
@@ -912,8 +934,8 @@ const maxTasks = 50
 
 // finish ends the turn: the status message says how it went, and the
 // waiting text goes out as a reply to the message that began the turn. A
-// reply after a long turn notifies its author. outcome is "", "failed" or
-// "stopped".
+// reply after a long turn notifies its author. outcome is "", "failed",
+// "stopped" or "continued" (the session was full and goes on in a new one).
 func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	took := time.Since(t.start).Round(time.Second)
 	t.done, t.outcome, t.took, t.used = true, outcome, took, -1
@@ -925,15 +947,39 @@ func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	b.chat(th).status(th, id, t)
 	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	*t = turn{}
-	result := done
-	if outcome != "" {
-		result = failed
-	}
+	b.mu.Lock()
+	asked, b.carried[th] = marks(b.carried[th], asked, outcome)
+	b.mu.Unlock()
 	for _, m := range asked {
-		b.chat(th).react(th, m, result)
+		b.chat(th).react(th, m, reaction(outcome))
 	}
 	if text != "" {
 		b.reply(th, text, key, took > 2*time.Minute)
+	}
+}
+
+// marks splits a thread's messages at the end of a turn: those to mark now,
+// and those carried to its next turn. A continued turn marks nothing and
+// carries its messages on; any other end marks them with those carried before.
+func marks(carried, asked []string, outcome string) (mark, carry []string) {
+	all := append(slices.Clone(carried), asked...)
+	if outcome == "continued" {
+		return nil, all
+	}
+	return all, nil
+}
+
+// reaction is the mark a turn's messages get when it ends: done, failed for a
+// failure or a stop, and none when it is continued in a new session, since
+// that is not where it ends.
+func reaction(outcome string) string {
+	switch outcome {
+	case "":
+		return done
+	case "continued":
+		return ""
+	default:
+		return failed
 	}
 }
 
