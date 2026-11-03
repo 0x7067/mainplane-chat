@@ -19,9 +19,9 @@ Preconditions:
 
 - A thread from thread-commands, moved to a new session at least once.
 
-- **Stop the bot.** On the M4: `launchctl bootout gui/$(id -u)/local.mainplane-chat` (`KeepAlive` would restart a plain kill). On systemd: `systemctl --user stop mainplane-chat`.
+- **Stop the bot.** `. ~/.config/mainplane-chat/deploy.sh && mpc_stop`.
 - **Send while down.** In the thread, send `reply with the word late`. In `#bot-test`, send `verify catch-up <run id>: reply with the word fresh`.
-- **Start the bot.** On the M4: `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/local.mainplane-chat.plist`, then `scripts/doctor.sh` passes. On systemd: `systemctl --user start mainplane-chat`; `scripts/doctor.sh` passes.
+- **Start the bot.** `mpc_start`, then `scripts/doctor.sh` passes.
 - **Proof.** `scripts/thread.sh <thread id>` shows `late` from the bot, and `mainplane tail <state file's session for the thread>` shows the message `via=discord`, so the moved mapping held. `scripts/thread.sh <bot-test id> 3` shows the `fresh` message with a new thread, which has `fresh`.
 
 ## Gotchas
