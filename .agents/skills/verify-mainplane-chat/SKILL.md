@@ -36,18 +36,23 @@ cp -p ~/go/bin/mainplane-chat ~/go/bin/mainplane-chat.prev
 go build -o ~/go/bin/mainplane-chat . && systemctl --user restart mainplane-chat
 ```
 
-On the M4, from a checkout there:
+The M4 has no checkout: build it on admin, from the verified commit, and copy it over:
 
 ```sh
-cp -p ~/.local/bin/mainplane-chat ~/.local/bin/mainplane-chat.prev
-go build -o ~/.local/bin/mainplane-chat . && launchctl kickstart -k gui/$(id -u)/local.mainplane-chat
+m4=pedrostestm4@100.64.0.10
+GOOS=darwin GOARCH=arm64 go build -o /tmp/mainplane-chat-darwin .
+ssh $m4 'cp -p ~/.local/bin/mainplane-chat ~/.local/bin/mainplane-chat.prev'
+scp /tmp/mainplane-chat-darwin $m4:.local/bin/mainplane-chat
+ssh $m4 'launchctl kickstart -k gui/$(id -u)/local.mainplane-chat'
 ```
 
 Ready when the log shows `caught up` after the restart. Teardown: restore `.prev` and restart again, if the change is not being kept.
 
 ## Doctor
 
-`scripts/doctor.sh` (read-only) checks `systemctl --user` and `journalctl` on Linux (admin), and the LaunchAgent and its log file on macOS (the M4). It checks that the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
+`scripts/doctor.sh [rev]` (read-only) checks `systemctl --user` and `journalctl` on Linux (admin), and the LaunchAgent and its log file on macOS (the M4). It checks that the service is active, the binary was built from this checkout's HEAD (or rev), the bot caught up since it started, the harness answers, and the state file parses.
+
+On the M4, run it over ssh with the commit deployed: `ssh $m4 "PATH=/opt/homebrew/bin:\$PATH bash -s -- $(git rev-parse HEAD)" < .agents/skills/verify-mainplane-chat/scripts/doctor.sh`.
 
 ## Drive
 

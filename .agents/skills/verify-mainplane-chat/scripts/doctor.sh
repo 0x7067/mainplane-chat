@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# doctor.sh: read-only health check of the running bot, from a checkout of the repo.
+# doctor.sh [rev]: read-only health check of the running bot. The binary must be
+# built from rev, by default the HEAD of the checkout it runs in.
 # Linux runs the systemd user service; macOS runs the launchd LaunchAgent local.mainplane-chat.
 set -uo pipefail
 ok=1
@@ -20,7 +21,7 @@ else
 	journalctl --user -u mainplane-chat --since "$since" -o cat --no-pager | grep -q 'caught up' && say ok "caught up since $since" || say FAIL "no 'caught up' since $since"
 fi
 rev="$(go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.revision=//p')"
-head="$(git rev-parse HEAD 2>/dev/null)"
+head="${1:-$(git rev-parse HEAD 2>/dev/null)}"
 dirty="$(go version -m "$bin" 2>/dev/null | sed -n 's/.*vcs.modified=//p')"
 [ -n "$rev" ] && [ "$rev" = "$head" ] && say ok "binary built from HEAD ${head:0:7}${dirty:+, modified=$dirty}" || say FAIL "binary rev ${rev:-unknown} is not HEAD ${head:0:7}"
 code="$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8080/)"

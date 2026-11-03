@@ -1,6 +1,6 @@
 # Turn status
 
-While the agent works on a turn, the thread shows one status message, edited in place: `**working** · started <t:…:R> · N calls`, the last three call lines, and a Stop button (`stop:<session id>`). At the end of the turn it becomes `-# N calls · 2m31s · 38% context`, or `-# failed after N calls · …` on an error (`stopped after` on a stop), with no button. Text the agent writes between calls goes out as plain messages; the final text goes out as a Discord reply to the message that began the turn. A turn with no calls has no status message.
+While the agent works on a turn, the thread shows one status message, edited in place: `**working** · started <t:…:R> · N calls`, the last three call lines, and a Stop button (`stop:<session id>`). At the end of the turn it becomes `-# N calls · 2m31s · 38% context`, or `-# failed after N calls · …` on an error (`stopped after` on a stop, `continued after` when the session was full and goes on in a new one), with no button. Text the agent writes between calls goes out as plain messages; the final text goes out as a Discord reply to the message that began the turn. A turn with no calls has no status message.
 
 ## Sub-features
 
@@ -8,7 +8,7 @@ While the agent works on a turn, the thread shows one status message, edited in 
 - `status-done` at the end the status is one `-#` line with calls, time and context, and no button.
 - `reply-ref` in a thread, the final reply references the message it answers. The first turn's starter message is in the parent channel and Discord refuses cross-channel replies (`REPLIES_CANNOT_REFERENCE_OTHER_CHANNEL`), so the first reply has no reference.
 - `reply-ping` a turn over two minutes notifies: `allowed_mentions.replied_user` on a reply, else a mention of the starter's author.
-- `marks` each message sent to the session gets the bot's 👀, replaced by ✅ when the turn ends, or ❌ when it fails or is stopped. A start message is marked in the parent channel, for every turn of its thread, so it shows how the last one went.
+- `marks` each message sent to the session gets the bot's 👀, replaced by ✅ when the turn ends, or ❌ when it fails or is stopped. A turn continued in a new session marks nothing: its messages get the mark of the turn that ends the work there (kept in memory, so a restart in between leaves them 👀). A start message is marked in the parent channel, for every turn of its thread, so it shows how the last one went.
 - `status-stop` the Stop button stops the session. A bot cannot click buttons: `!stop` drives the same code; the click itself needs a person.
 
 ## Driving it with say.sh
