@@ -179,23 +179,23 @@ func chatType(ch string) string {
 }
 
 // hears is whether the bot takes a message in a conversation of type chType.
-// Every DM message is for it; in the others, only a message that mentions it
-// or a reply in a thread it runs is, so ordinary chatter never reaches an
-// agent.
-func hears(chType string, mentioned, owned bool) bool {
-	return chType == "im" || mentioned || owned
+// Every DM message is for it; in the others, only a message that mentions it,
+// even in a thread it runs, so people can talk in its threads without the
+// agent answering each message.
+func hears(chType string, mentioned bool) bool {
+	return chType == "im" || mentioned
 }
 
-// handle takes a message event. A top-level message starts a session in its
-// thread, and a reply continues the session its thread shows. In a channel,
-// a message that mentions the bot starts one too, in the thread it is in.
+// handle takes a message event it hears. A top-level message starts a session
+// in its thread, and a reply continues the session its thread shows. In a
+// channel, a mention in a thread the bot does not run starts one in that thread.
 func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	if !slices.Contains([]string{"", "file_share", "thread_broadcast"}, m.SubType) {
 		return
 	}
 	root := cmp.Or(m.ThreadTimeStamp, m.TimeStamp)
 	th := s.thread(m.Channel, root)
-	if !hears(m.ChannelType, s.mention.MatchString(m.Text), s.b.sessionFor(th) != "") || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
+	if !hears(m.ChannelType, s.mention.MatchString(m.Text)) || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
 		return
 	}
 	// A user's message sent through another app, as slack-axi sends them, has
