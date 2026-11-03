@@ -14,7 +14,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -248,33 +247,23 @@ func (b *bridge) start(via string, open func(id string) (string, error), msgID, 
 	return nil
 }
 
-// newConf is the config of a new session, picked as the terminal app picks
-// it: the model of the newest session, else the catalog's default, each only
-// when its provider is connected. Its workers are every connected worker.
+// newConf is the config of a new session (choices.startConf, from startBase),
+// with every connected worker.
 func (b *bridge) newConf() (statefile.Conf, error) {
-	cat, ids, err := b.models()
+	ch, recent, err := b.choices()
 	if err != nil {
 		return statefile.Conf{}, err
 	}
-	if len(ids) == 0 {
-		return statefile.Conf{}, errors.New("no provider of the catalog is connected")
+	b.mu.Lock()
+	var shown []string
+	for _, t := range b.st.Threads {
+		shown = append(shown, t.Session)
 	}
-	want := cat.Groups[defaults]
-	var newest []info
-	if err := b.call("GET", "/sessions?limit=1", "", nil, &newest); err != nil {
-		return statefile.Conf{}, err
+	b.mu.Unlock()
+	conf, err := ch.startConf(startBase(recent, shown))
+	if err != nil {
+		return conf, err
 	}
-	if len(newest) > 0 {
-		want = append([]string{newest[0].Config.Preset, newest[0].Config.Model}, want...)
-	}
-	pick := ids[0]
-	for _, id := range want {
-		if slices.Contains(ids, id) {
-			pick = id
-			break
-		}
-	}
-	conf := presetConf(pick, cat.Presets[pick])
 	conf.Workers, err = b.workers()
 	return conf, err
 }
@@ -291,16 +280,13 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 	}
 	conf := cur.Config
 	if model != "" {
-		cat, ids, err := b.models()
+		ch, _, err := b.choices()
 		if err != nil {
 			return "", err
 		}
-		id := pickModel(cat, ids, model)
-		if id == "" {
-			return "", fmt.Errorf("no connected model %q: !model lists them", model)
+		if conf, err = ch.switchConf(cur.Config, model); err != nil {
+			return "", err
 		}
-		conf = presetConf(id, cat.Presets[id])
-		conf.Workers = cur.Config.Workers
 	}
 	id, err := b.create(conf, platform(th))
 	if err != nil {
@@ -512,20 +498,14 @@ func (b *bridge) listModels(th, id string) error {
 // modelList is the connected models, session id's first, so that a picker
 // that shows only some shows it.
 func (b *bridge) modelList(id string) ([]model, error) {
-	cat, ids, err := b.models()
+	ch, _, err := b.choices()
 	if err != nil {
 		return nil, err
 	}
-	if len(ids) == 0 {
-		return nil, errors.New("no provider of the catalog is connected")
-	}
 	cur, _ := b.info(id)
-	if i := slices.Index(ids, cur.Config.Preset); i > 0 {
-		ids = slices.Concat(ids[i:i+1], ids[:i], ids[i+1:])
-	}
-	var ms []model
-	for _, m := range ids {
-		ms = append(ms, model{ID: m, Name: cmp.Or(cat.Presets[m].Name, m), Current: m == cur.Config.Preset})
+	ms := ch.list(cur.Config)
+	if len(ms) == 0 {
+		return nil, errNoModel
 	}
 	return ms, nil
 }
@@ -544,41 +524,34 @@ func (b *bridge) sayInfo(th, id string) error {
 	return nil
 }
 
-// models is the catalog and the ids of its presets whose provider the harness
-// serves, in the catalog's order: the models the terminal app offers.
-func (b *bridge) models() (catalog.Catalog, []string, error) {
+// choices is what sessions can run on now: the catalog, the providers the
+// harness serves, and the models of the newest 20 sessions; without the
+// catalog, those models still are. It also returns the newest 100 sessions,
+// for startBase to find the newest one a thread shows.
+func (b *bridge) choices() (choices, []info, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	cat, err := catalog.Fetch(ctx)
 	if err != nil {
-		return cat, nil, err
+		log.Printf("catalog: %v", err)
 	}
 	var ps []struct{ Name string }
 	if err := b.call("GET", "/providers", "", nil, &ps); err != nil {
-		return cat, nil, err
+		return choices{}, nil, err
 	}
-	var ids []string
-	for _, id := range cat.Groups[group] {
-		if slices.ContainsFunc(ps, func(p struct{ Name string }) bool { return p.Name == cat.Presets[id].Provider }) {
-			ids = append(ids, id)
-		}
+	var recent []info
+	if err := b.call("GET", "/sessions?limit=100", "", nil, &recent); err != nil {
+		return choices{}, nil, err
 	}
-	return cat, ids, nil
-}
-
-// pickModel is the id among ids that s names: the id, the model or its name.
-func pickModel(cat catalog.Catalog, ids []string, s string) string {
-	for _, id := range ids {
-		p := cat.Presets[id]
-		if strings.EqualFold(s, id) || strings.EqualFold(s, p.Model) || strings.EqualFold(s, p.Name) {
-			return id
-		}
+	var names []string
+	for _, p := range ps {
+		names = append(names, p.Name)
 	}
-	return ""
-}
-
-func presetConf(id string, p catalog.Preset) statefile.Conf {
-	return statefile.Conf{Model: p.Provider + "/" + p.Model, Tools: p.Tools, ContextLimit: p.ContextLimit, Input: p.Input, Params: p.Params, Preset: id}
+	var confs []statefile.Conf
+	for _, s := range recent[:min(len(recent), 20)] {
+		confs = append(confs, s.Config)
+	}
+	return newChoices(cat, names, confs), recent, nil
 }
 
 // workers is every connected worker.

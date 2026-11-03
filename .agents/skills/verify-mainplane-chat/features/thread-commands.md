@@ -4,9 +4,9 @@ In a thread, `/model`, `/continue`, `/retry`, `/stop`, `/info` and `/delete` act
 
 ## Sub-features
 
-- `cmd-model-list` `/model` shows a select of the connected models (`model:<session id>`, value the preset id), the current one chosen; picking one is `/model <id>`.
+- `cmd-model-list` `/model` shows a select of the connected models (`model:<session id>`, value the preset id, or `<provider>/<model>` for a model outside the catalog that a recent session used), the current one chosen; picking one is `/model <id>`.
 - `cmd-error-buttons` an error comes with a Retry button (`retry:<session id>`) and the model select. Bots cannot click: the click runs the same `!retry` / `!model <id>`, with the clicked message as the reply target.
-- `cmd-model` `/model <id> [message]` continues in a new session on that model, same workers; the thread follows it.
+- `cmd-model` `/model <id> [message]` continues in a new session on that model, same workers; the thread follows it. Any `<provider>/<model>` of a connected provider works; outside the catalog it keeps the session's tools and context limit, and drops its params.
 - `cmd-model-fast` three `/model` in a row in one thread each answer within seconds; the bot does not stall.
 - `cmd-continue` `/continue [message]` continues in a new session with the same config.
 - `cmd-retry` `/retry` steps a failed session again.
@@ -35,6 +35,6 @@ Preconditions:
 
 ## Gotchas
 
-- `/model` with an unknown id answers `/model failed: no connected model`; ids are the select's option values.
+- `/model` with an unknown id, or a `<provider>/<model>` whose provider the harness does not serve, answers `/model failed: no connected model`; ids are the select's option values.
 - Each switch makes a session; delete them in cleanup.
 - The tester sends plain messages; a person typing `/model` in the Discord client may see Discord's own command picker, and Enter still sends it as text.
