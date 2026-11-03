@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -208,5 +209,19 @@ func TestReaction(t *testing.T) {
 		if got := reaction(outcome); got != want {
 			t.Errorf("reaction(%q) = %q, want %q", outcome, got, want)
 		}
+	}
+}
+
+func TestMarks(t *testing.T) {
+	mark, carry := marks(nil, []string{"m1"}, "continued")
+	if len(mark) != 0 || !slices.Equal(carry, []string{"m1"}) {
+		t.Errorf("continued: mark %v carry %v, want none and [m1]", mark, carry)
+	}
+	mark, carry = marks(carry, []string{"m2"}, "")
+	if !slices.Equal(mark, []string{"m1", "m2"}) || carry != nil {
+		t.Errorf("done after a continuation: mark %v carry %v, want [m1 m2] and none", mark, carry)
+	}
+	if mark, _ := marks([]string{"m1"}, nil, "failed"); !slices.Equal(mark, []string{"m1"}) {
+		t.Errorf("failed after a continuation: mark %v, want [m1]", mark)
 	}
 }
