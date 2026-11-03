@@ -91,7 +91,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 - A message in any channel starts a session in a new thread named `<session id> <first words>`. Its model is picked as the Mainplane terminal app picks it: the newest session's, else the catalog's default, if its provider is connected. Its workers are every connected worker.
 - A session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`, from when mirroring began. The bot finds the channel by name.
 - Messages sent from elsewhere show quoted with their source (`> **cli:** …`), and a background job's report shows as one line (`-# job on admin exited 0 after 40s`).
-- A thread whose session is deleted is archived and locked. In `#sessions`, the thread and its post are deleted instead. When a session gets a name, its thread is renamed `<id> <name>`.
+- A thread whose session is deleted is archived and locked. In `#sessions`, its post is deleted too, so the channel lists live sessions. When a session gets a name, its thread is renamed `<id> <name>`.
 - The final reply is a Discord reply to the message it answers. It notifies you when the turn took over two minutes.
 - Each message sent to a session gets a reaction: 👀 while the agent works, then ✅ or ❌. The start messages in a channel, and the posts in `#sessions`, show how each session's last turn went.
 - The bot reads an `attach:` file on its own machine, up to 20 MiB, and uploads it in place of the line.

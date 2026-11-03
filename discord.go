@@ -363,28 +363,23 @@ func (d *discord) rename(th, id, name string) {
 	}
 }
 
-// close shows that the thread's session is gone. A thread in #sessions only
-// mirrored it, so it goes, with its post, as the session went from the
-// terminal app; any other thread holds the person's own messages, so it is
-// archived and locked.
+// close archives and locks the thread. A thread in #sessions loses its post
+// too, so the channel lists the sessions the terminal app lists.
 func (d *discord) close(th string) {
 	ch := d.id(th)
-	t := d.channel(ch)
+	yes := true
+	t, err := d.dc.ChannelEdit(ch, &discordgo.ChannelEdit{Archived: &yes, Locked: &yes})
+	if err != nil {
+		log.Printf("archive thread %s: %v", th, err)
+		return
+	}
 	d.mu.Lock()
-	mirrored := t != nil && t.ParentID == d.sessions
+	mirrored := t.ParentID == d.sessions
 	d.mu.Unlock()
 	if mirrored {
-		if _, err := d.dc.ChannelDelete(ch); err != nil {
-			log.Printf("delete thread %s: %v", th, err)
-		}
 		if err := d.dc.ChannelMessageDelete(t.ParentID, ch); err != nil {
 			log.Printf("delete post %s: %v", th, err)
 		}
-		return
-	}
-	yes := true
-	if _, err := d.dc.ChannelEdit(ch, &discordgo.ChannelEdit{Archived: &yes, Locked: &yes}); err != nil {
-		log.Printf("archive thread %s: %v", th, err)
 	}
 }
 
