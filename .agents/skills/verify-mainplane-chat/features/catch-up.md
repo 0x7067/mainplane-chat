@@ -21,7 +21,7 @@ Preconditions:
 
 - **Stop the bot.** `. ~/.config/mainplane-chat/deploy.sh && mpc_stop`.
 - **Send while down.** In the thread, send `reply with the word late`. In `#bot-test`, send `verify catch-up <run id>: reply with the word fresh`.
-- **Start the bot.** `mpc_start`, then `scripts/doctor.sh` passes.
+- **Start the bot.** `. ~/.config/mainplane-chat/deploy.sh && mpc_start`, then `scripts/doctor.sh` passes.
 - **Proof.** `scripts/thread.sh <thread id>` shows `late` from the bot, and `mainplane tail <state file's session for the thread>` shows the message `via=discord`, so the moved mapping held. `scripts/thread.sh <bot-test id> 3` shows the `fresh` message with a new thread, which has `fresh`.
 
 ## Gotchas
