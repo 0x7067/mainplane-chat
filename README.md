@@ -84,6 +84,15 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 | `/info` | show the status, model, workers and context |
 | `/delete` | delete the session for good, as `mainplane delete` does |
 
+## Trying a build
+
+`mainplane-chat -console` runs the bridge in the terminal against the harness, with no chat tokens and a throwaway state file, so the running bot is untouched. Each stdin line is a message in one thread: the first starts a session (or `-session <id>` shows an existing one), the rest are messages and thread commands. It prints what the bot would post: `say:` replies, `react` marks, and `status:` lines titled as in Slack, with each call's plan status at the end of a turn. At the end of input it waits (`-wait`, default 10m) for the session to stop working.
+
+```sh
+printf '!info\n' | MAINPLANE_KEY=... mainplane-chat -console -session 5b733adb
+printf 'list the files in /tmp\n' | MAINPLANE_KEY=... mainplane-chat -console
+```
+
 ## Details
 
 <details>

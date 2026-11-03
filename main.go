@@ -18,6 +18,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
 	"io"
 	"log"
@@ -129,6 +130,10 @@ type info struct {
 }
 
 func main() {
+	try := flag.Bool("console", false, "try this build in the terminal against the harness: stdin lines are messages in one thread, and what the bot would post is printed; no chat tokens needed, and the bot's state is not touched")
+	session := flag.String("session", "", "with -console: show this session in the thread instead of starting one")
+	wait := flag.Duration("wait", 10*time.Minute, "with -console: how long to wait at the end of input for the session to stop working")
+	flag.Parse()
 	b := &bridge{
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),
@@ -138,6 +143,17 @@ func main() {
 		carried:   map[string][]string{},
 		sentIn:    map[string]string{},
 		renames:   map[string]*title{},
+	}
+	if *try {
+		dir, err := os.MkdirTemp("", "mainplane-chat-console")
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer os.RemoveAll(dir)
+		b.path = filepath.Join(dir, "state.json")
+		b.load()
+		runConsole(b, *session, *wait)
+		return
 	}
 	b.load()
 	b.chats = map[string]chat{}
