@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -175,18 +176,27 @@ func TestProviderFull(t *testing.T) {
 	}
 }
 
-func TestLongEnough(t *testing.T) {
+func TestHistoryOverflow(t *testing.T) {
+	llama := func(req, ctx int) string {
+		return fmt.Sprintf(`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"request (%d tokens) exceeds the available context size (%d tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":%d,"n_ctx":%d}}`, req, ctx, req, ctx)
+	}
+	openai := `openai-chat: 400 Bad Request: {"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 128500 tokens.","code":"context_length_exceeded"}}`
 	for _, c := range []struct {
-		used, limit int
-		want        bool
+		name string
+		body string
+		used int
+		want bool
 	}{
-		{65427, 65536, true}, // the session that hit the provider's window
-		{32768, 65536, true}, // half
-		{4200, 65536, false}, // a fresh session: one message too big on its own
-		{100, 0, false},      // no limit known
+		{"history filled the window (the inventory M4 session)", llama(65537, 65536), 65427, true},
+		{"window smaller than the configured limit", llama(65600, 65536), 65000, true},
+		{"one huge message late in a session", llama(115000, 65536), 40000, false},
+		{"one huge message in a fresh session", llama(200025, 65536), 0, false},
+		{"openai, history", openai, 127000, true},
+		{"openai, huge message", openai, 20000, false},
+		{"no sizes in the error", `openai-chat: 400 Bad Request: {"error":{"code":"context_length_exceeded"}}`, 60000, false},
 	} {
-		if got := longEnough(c.used, c.limit); got != c.want {
-			t.Errorf("longEnough(%d, %d) = %v, want %v", c.used, c.limit, got, c.want)
+		if got := historyOverflow(c.body, c.used); got != c.want {
+			t.Errorf("%s: historyOverflow = %v, want %v", c.name, got, c.want)
 		}
 	}
 }

@@ -14,6 +14,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -27,7 +28,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -321,12 +324,37 @@ func providerFull(body string) bool {
 	return strings.Contains(body, "exceed_context_size_error") || strings.Contains(body, "context_length_exceeded")
 }
 
-// longEnough is whether a session used enough of its context limit for a
-// provider's refusal to mean the session is full. A request too big on its
-// own, such as one huge message, fails at once in a new session too, so it
-// gets Retry, not a chain of continuations.
-func longEnough(used, limit int) bool {
-	return limit > 0 && used*2 >= limit
+// overflowSizes are the request's tokens and the provider's window from its
+// refusal: llama-server's "n_prompt_tokens":N and "n_ctx":N, or OpenAI's
+// "maximum context length is N tokens ... resulted in N tokens". Zero when
+// the body does not say.
+var (
+	llamaPrompt = regexp.MustCompile(`"n_prompt_tokens":(\d+)`)
+	llamaCtx    = regexp.MustCompile(`"n_ctx":(\d+)`)
+	openaiCtx   = regexp.MustCompile(`maximum context length is (\d+) tokens`)
+	openaiReq   = regexp.MustCompile(`resulted in (\d+) tokens`)
+)
+
+func overflowSizes(body string) (request, window int) {
+	num := func(re *regexp.Regexp) int {
+		if m := re.FindStringSubmatch(body); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			return n
+		}
+		return 0
+	}
+	return cmp.Or(num(llamaPrompt), num(openaiReq)), cmp.Or(num(llamaCtx), num(openaiCtx))
+}
+
+// historyOverflow is whether a provider's refusal came from the session's
+// history rather than from what was just added: what the request adds over
+// the context the session last used is under half the window, so a new
+// session, which starts with only that, fits. One oversized message, at any
+// point in a session, keeps Retry instead of failing again in a continuation.
+// Without the sizes, it is not a history overflow.
+func historyOverflow(body string, used int) bool {
+	request, window := overflowSizes(body)
+	return request > 0 && window > 0 && (request-used)*2 < window
 }
 
 // endedFull is whether a session's error record ends it full, so the bot continues it.
@@ -338,7 +366,7 @@ func (b *bridge) endedFull(id, body string) bool {
 		return false
 	}
 	i, err := b.info(id)
-	return err == nil && longEnough(i.ContextUsed, i.Config.ContextLimit)
+	return err == nil && historyOverflow(body, i.ContextUsed)
 }
 
 // fullKey starts the idempotency key of the first message of a session the
