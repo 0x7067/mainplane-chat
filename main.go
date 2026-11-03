@@ -84,6 +84,7 @@ type chat interface {
 	// status posts or edits the turn's status message; t.done shrinks it, and
 	// comes at the end of every turn, with or without a status message.
 	status(th, id string, t *turn)
+	// react marks message msgID, or the thread itself when msgID is "".
 	react(th, msgID, emoji string)
 	rename(th, id, name string)
 	// close shows that the thread's session is gone.
@@ -195,7 +196,6 @@ func (b *bridge) command(th, id, msgID, text string) bool {
 		err = b.call("POST", "/sessions/"+id+"/stop?via="+platform(th), "", nil, nil)
 	case "retry":
 		if err = b.call("POST", "/sessions/"+id+"/retry?via="+platform(th), "", nil, nil); err == nil {
-			b.chat(th).react(th, "", seen) // the session works again; Slack shows it
 			b.resume(th, id)
 		}
 	case "info":
@@ -763,6 +763,11 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.say(th, msg{Note: jobLine(string(r.Body))})
 		case r.Via != platform(th) && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
+		}
+		// Every turn asked or retried, from anywhere, shows on the thread itself.
+		if r.Via != "job" && strings.HasPrefix(r.Type, "text/plain") && !slices.Contains(t.asked, "") {
+			t.asked = append(t.asked, "")
+			b.chat(th).react(th, "", seen)
 		}
 	case statefile.Name:
 		// The session's label, often set by its agent at the start: the thread

@@ -8,7 +8,7 @@ While the agent works on a turn, the thread shows one status message, edited in 
 - `status-done` at the end the status is one `-#` line with calls, time and context, and no button.
 - `reply-ref` in a thread, the final reply references the message it answers. The first turn's starter message is in the parent channel and Discord refuses cross-channel replies (`REPLIES_CANNOT_REFERENCE_OTHER_CHANNEL`), so the first reply has no reference.
 - `reply-ping` a turn over two minutes notifies: `allowed_mentions.replied_user` on a reply, else a mention of the starter's author.
-- `marks` each message sent to the session gets the bot's 👀, replaced by ✅ when the turn ends, or ❌ when it fails or is stopped. A start message is marked in the parent channel.
+- `marks` each message sent to the session gets the bot's 👀, replaced by ✅ when the turn ends, or ❌ when it fails or is stopped. A start message is marked in the parent channel, for every turn of its thread, so it shows how the last one went.
 - `status-stop` the Stop button stops the session. A bot cannot click buttons: `!stop` drives the same code; the click itself needs a person.
 
 ## Driving it with say.sh
