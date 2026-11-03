@@ -4,7 +4,7 @@ The Slack side has no tester bot: tests post as the user in his DM with the app 
 
 - **Start.** `slack-say.sh "verify slack <run>: reply with the word ok"`. Expect a reply in the message's thread and ✅ on the message; the state has the thread.
 - **Turn status.** A reply that makes tool calls: a plan block status message, `Working · N calls`, with a task per call (`run on <worker>`, its command in code style) going `in_progress` to `complete`, or `error` on a non-zero exit. At the end its title is `Done · N calls · Ts · P% context · <id>`. Read it with `conversations.replies` and jq on `.blocks[0]`: `slack-thread.sh` shows only the fallback text.
-- **Commands.** `!info`, `!continue <msg>` (a "continuing in session" note; the thread moves), `!model` (lists the models).
+- **Commands.** `!info`, `!continue <msg>` (a "continuing in session" note; the thread moves), `!model` (lists the models), `!delete` (the session is gone and the agent session closed).
 - **Quote.** `mainplane message <id> "<text>"` shows as `> **cli:** <text>`.
 - **Catch-up.** Stop the service, reply in the thread, start it: the reply is answered.
 - **Gone.** `mainplane delete <id>`: the thread's entry leaves the state, and the agent session is closed.

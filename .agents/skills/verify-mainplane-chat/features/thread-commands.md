@@ -1,6 +1,6 @@
 # Thread commands
 
-In a thread, `/model`, `/continue`, `/retry`, `/stop` and `/info` act on the thread's session as the terminal app and CLI do; `!` works in place of `/`. `/model` and `/continue` continue in a new session, and the thread follows it without being renamed.
+In a thread, `/model`, `/continue`, `/retry`, `/stop`, `/info` and `/delete` act on the thread's session as the terminal app and CLI do; `!` works in place of `/`. `/model` and `/continue` continue in a new session, and the thread follows it without being renamed.
 
 ## Sub-features
 
@@ -12,6 +12,7 @@ In a thread, `/model`, `/continue`, `/retry`, `/stop` and `/info` act on the thr
 - `cmd-retry` `/retry` steps a failed session again.
 - `cmd-stop` `/stop` stops the running step.
 - `cmd-info` `/info` shows status, model, workers and context.
+- `cmd-delete` `/delete` deletes the session; the thread then closes as for a delete from the CLI (mirroring.md, slack.md).
 
 ## How to get to it (user POV)
 
@@ -30,6 +31,7 @@ Preconditions:
 - **Continue.** Send `/continue reply with the word d`. A `continuing in session` line on the same model, then `d`.
 - **Stop.** Send `use the run tool to execute: sleep 120 on <worker>, then reply done`, wait for the `-# run on <worker>: sleep 120` line, then send `/stop`. A `⚠️` line says the session was stopped by discord; `mainplane info` shows `failed`.
 - **Retry.** Send `/retry`. `mainplane info` shows `stepping`, and the bot relays the step again (`-# run on <worker>: sleep 120`); send `/stop` to end it.
+- **Delete.** In a test thread, send `/delete`. `mainplane info <id>` fails with no such file, the thread's entry leaves the state file, and `scripts/discord.sh /channels/<thread id> | jq .thread_metadata` shows `archived: true, locked: true`.
 
 ## Gotchas
 

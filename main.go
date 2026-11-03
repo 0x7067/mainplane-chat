@@ -204,6 +204,12 @@ func (b *bridge) command(th, id, msgID, text string) bool {
 		}
 	case "info":
 		err = b.sayInfo(th, id)
+	case "delete":
+		// As the CLI's delete: the session is gone, and the thread shows it.
+		if err = b.call("DELETE", "/sessions/"+id+"?via="+platform(th), "", nil, nil); err == nil {
+			b.forget(th)
+			b.chat(th).close(th)
+		}
 	case "continue":
 		_, err = b.continueIn(th, id, msgID, "", rest)
 	case "model":
