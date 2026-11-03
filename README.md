@@ -18,7 +18,7 @@
 
 ## Features
 
-- **A thread per session.** A message in a channel (Discord) or a DM (Slack) starts a session in a new thread. Replies in the thread continue it.
+- **A thread per session.** A message in a channel (Discord), or a DM or a mention of the app in a Slack channel or group DM, starts a session in a thread. Replies in the thread continue it.
 - **Live status.** One message shows the running turn: its time, its last tool calls and a Stop button. When the turn ends, it shrinks to one line: `14 calls · 2m31s · 38% context`.
 - **Files in both directions.** Send images and text files with a message. The agent sends a file back with a line `attach: /path/to/file` in its reply.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
@@ -45,7 +45,7 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
 
 2. For Discord, make a bot in the [Developer Portal](https://discord.com/developers/applications). Turn on the **Message Content** intent. Invite it to a private server with permission to read and send messages, manage threads, add reactions and attach files. Make a text channel named `sessions` for sessions started outside Discord.
 
-3. For Slack, make an app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode.
+3. For Slack, make an app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode. An app made from an older manifest needs the new events and scopes, then a reinstall, before it hears channels and group DMs.
 
 4. Install and run:
 
@@ -54,7 +54,7 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
    mainplane-chat
    ```
 
-   To keep it running, use a systemd user service or similar, with the environment below in an env file.
+   To keep it running, use a systemd user service or similar, with the environment below in an env file. On macOS, use a user LaunchAgent with `RunAtLoad` and `KeepAlive`, whose program is `/bin/zsh -c 'set -a; source $HOME/.config/mainplane-chat/env; exec $HOME/.local/bin/mainplane-chat'`, and restart it with `launchctl kickstart -k gui/$(id -u)/<label>`.
 
 | Variable | |
 | --- | --- |
@@ -105,6 +105,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 <summary>Slack</summary>
 
 - A top-level DM to the app starts a session in its thread, which is a Slack agent session. Slack shows its title (the first words, then the session's name), its working state and a Stop button. A title changed in Slack names the session.
+- In a group DM, private channel or channel the app is in, it hears only messages that mention it, and replies in threads it runs. A mention starts a session in the thread it is in (its own thread, or the thread it replies in), and the mention is left out of the text the agent gets. Other chatter is ignored.
 - Only users in `MAINPLANE_SLACK_USERS` are heard. A reply also sent to the DM counts.
 - Status, quotes, job lines, files, `attach:`, Retry, the model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched.
 - The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends. A failed step marks the agent session suspended.

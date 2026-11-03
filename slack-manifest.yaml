@@ -16,6 +16,9 @@ oauth_config:
       - assistant:write
       - chat:write
       - im:history
+      - channels:history
+      - groups:history
+      - mpim:history
       - files:read
       - files:write
       - reactions:write
@@ -27,6 +30,9 @@ settings:
     bot_events:
       - app_home_opened
       - message.im
+      - message.mpim
+      - message.groups
+      - message.channels
       - agent_session_stopped
       - agent_session_title_changed
   org_deploy_enabled: false
