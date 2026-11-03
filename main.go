@@ -305,6 +305,9 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 		b.say(o, msg{Note: "continued in session " + id})
 	}
 	m := continuePrefix + old + ". Retrieve key context from it as you go."
+	if paths := b.logPaths(old, cur.Config); len(paths) > 0 {
+		m += " Its log: " + strings.Join(paths, ", ") + "."
+	}
 	if text != "" {
 		m += "\n" + text
 	}
@@ -636,6 +639,35 @@ func (b *bridge) workers() ([]statefile.Worker, error) {
 		}
 	}
 	return all, nil
+}
+
+// logPaths are where the harness copied a session's records when it
+// stopped, which its system prompt says a continuation names: the log on each
+// connected worker of its config. None when the workers cannot be listed.
+func (b *bridge) logPaths(id string, conf statefile.Conf) []string {
+	var ws []struct{ Name, Scratch, Refused string }
+	if err := b.call("GET", "/workers", "", nil, &ws); err != nil {
+		log.Printf("workers: %v", err)
+		return nil
+	}
+	scratch := map[string]string{}
+	for _, w := range ws {
+		if w.Refused == "" && w.Scratch != "" {
+			scratch[w.Name] = w.Scratch
+		}
+	}
+	return logLines(id, conf.Workers, scratch)
+}
+
+// logLines names <scratch>/logs/<id>.log on each of workers that has a scratch.
+func logLines(id string, workers []statefile.Worker, scratch map[string]string) []string {
+	var out []string
+	for _, w := range workers {
+		if s, ok := scratch[w.Name]; ok {
+			out = append(out, s+"/logs/"+id+".log on "+w.Name)
+		}
+	}
+	return out
 }
 
 func (b *bridge) create(conf statefile.Conf, via string) (string, error) {
