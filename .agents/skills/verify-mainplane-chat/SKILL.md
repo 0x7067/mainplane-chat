@@ -5,7 +5,7 @@ description: Drive the mainplane-chat bot the way its user does, by typing in Di
 
 # Verify mainplane-chat
 
-The bot runs on the harness machine as the systemd user service `mainplane-chat`, from `~/go/bin/mainplane-chat`. A user drives it by typing in a private Discord server; it talks to the Mainplane harness at `http://127.0.0.1:8080`. Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
+The live bot runs on the harness machine, the M4 Mac (`ssh pedrostestm4@Inventory-MYFQJGWG95`), as the user LaunchAgent `local.mainplane-chat` (`~/Library/LaunchAgents/local.mainplane-chat.plist`), from `~/.local/bin/mainplane-chat`. It talks to the Mainplane harness at `http://127.0.0.1:8080`. Its env sets Slack tokens and no Discord token, so the Discord steps below do not apply there unless a Discord bot is added. A user drives the bot by typing in a private Discord server (or Slack on the M4). Verification types as a separate tester bot, "Mainplane Tester", which the bot handles like a person while its env file sets `MAINPLANE_DISCORD_TESTER` to the tester's user id. Never automate a person's Discord account: Discord bans self-bots.
 
 | Thing | Value |
 | --- | --- |
@@ -14,7 +14,7 @@ The bot runs on the harness machine as the systemd user service `mainplane-chat`
 | Bot user | `scripts/discord.sh /users/@me` |
 | Tester | `~/.config/mainplane-chat/tester.env`, mode 600: `TESTER_TOKEN=` its token, `SLACK_DM=` the user's DM channel with the Slack app |
 | State file | `~/.local/state/mainplane-chat/state.json` on the server |
-| Logs | `journalctl --user -u mainplane-chat` on the server |
+| Logs | `~/Library/Logs/mainplane-chat.log` on the server (the LaunchAgent's stdout and stderr); on systemd, `journalctl --user -u mainplane-chat` |
 
 The helpers in `scripts/` run on the server, from a checkout of this repo.
 
@@ -23,15 +23,15 @@ The helpers in `scripts/` run on the server, from a checkout of this repo.
 Build the branch under test and swap it in; keep the previous binary to restore.
 
 ```sh
-cp -p ~/go/bin/mainplane-chat ~/go/bin/mainplane-chat.prev
-go build -o ~/go/bin/mainplane-chat . && systemctl --user restart mainplane-chat
+cp -p ~/.local/bin/mainplane-chat ~/.local/bin/mainplane-chat.prev
+go build -o ~/.local/bin/mainplane-chat . && launchctl kickstart -k gui/$(id -u)/local.mainplane-chat
 ```
 
-Ready when the journal shows `caught up` after the restart (`scripts/doctor.sh` checks it). Teardown: restore `.prev` and restart, if the change is not being kept.
+Ready when the log shows `caught up` after the restart. Teardown: restore `.prev` and kickstart again, if the change is not being kept. On a systemd host, the same steps use `~/go/bin/mainplane-chat` and `systemctl --user restart mainplane-chat`.
 
 ## Doctor
 
-`scripts/doctor.sh` (read-only): the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
+`scripts/doctor.sh` (read-only) is written for systemd: it checks `systemctl --user` and `journalctl`, so on the M4 read the log and check the LaunchAgent with `launchctl print gui/$(id -u)/local.mainplane-chat` by hand. It checks that the service is active, the binary was built from this checkout's HEAD, the bot caught up since it started, the harness answers, and the state file parses.
 
 ## Drive
 
