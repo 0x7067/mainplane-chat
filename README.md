@@ -45,7 +45,7 @@ You need a running [Mainplane server](https://github.com/mainplane-ai/mainplane#
 
 2. For Discord, make a bot in the [Developer Portal](https://discord.com/developers/applications). Turn on the **Message Content** intent. Invite it to a private server with permission to read and send messages, manage threads, add reactions and attach files. Make a text channel named `sessions` for sessions started outside Discord.
 
-3. For Slack, make an app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode. An app made from an older manifest needs the new events and scopes, then a reinstall, before it hears channels and group DMs.
+3. For Slack, make an app [from the manifest](https://api.slack.com/apps?new_app=1) in [`slack-manifest.yaml`](slack-manifest.yaml) and install it to your workspace. Make an app-level token with `connections:write` for Socket Mode. An app made from an older manifest needs the new events and scopes, then a reinstall, before it hears channels and group DMs. At start, the bot logs each scope its app lacks and what goes without it: `slack: the app lacks users:read: names show as user ids, ...`.
 
 4. Install and run:
 

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"html"
 	"log"
+	"net/http"
 	"regexp"
 	"slices"
 	"strconv"
@@ -71,7 +72,65 @@ func newSlack(b *bridge, botToken, appToken, users string) *slackChat {
 	s.name = me.User
 	s.mention = mentionOf(s.self)
 	s.sm = socketmode.New(s.sl)
+	if have, err := grantedScopes(botToken); err != nil {
+		log.Printf("slack scopes: %v", err)
+	} else {
+		for _, l := range lacking(have) {
+			log.Print("slack: " + l)
+		}
+	}
 	return s
+}
+
+// scopeNeeds are the bot scopes slack-manifest.yaml asks for, each with what
+// goes without it, so a deployment's app with fewer says at start what it lacks.
+var scopeNeeds = []struct{ scope, without string }{
+	{"assistant:write", "threads are not agent sessions: no title, working state or Stop"},
+	{"chat:write", "the bot cannot post"},
+	{"im:history", "DMs never arrive"},
+	{"channels:history", "public channel messages never arrive"},
+	{"groups:history", "private channel messages never arrive"},
+	{"mpim:history", "group DM messages never arrive"},
+	{"users:read", `names show as user ids, and "*" lets in only listed users`},
+	{"channels:read", "the agent is not told which public channel it is in"},
+	{"groups:read", "the agent is not told which private channel it is in"},
+	{"im:read", "the agent is not told it is in a DM"},
+	{"mpim:read", "the agent is not told which group DM it is in, or who is in it"},
+	{"files:read", "files sent with a message are not fetched"},
+	{"files:write", "attach: lines do not upload"},
+	{"reactions:write", "messages get no 👀, ✅ or ❌"},
+}
+
+// lacking is a line per needed scope missing from have, a token's
+// comma-separated scopes.
+func lacking(have string) []string {
+	got := map[string]bool{}
+	for _, sc := range strings.Split(have, ",") {
+		got[strings.TrimSpace(sc)] = true
+	}
+	var out []string
+	for _, n := range scopeNeeds {
+		if !got[n.scope] {
+			out = append(out, "the app lacks "+n.scope+": "+n.without)
+		}
+	}
+	return out
+}
+
+// grantedScopes are the bot token's scopes, which Slack gives only in a
+// response header.
+func grantedScopes(token string) (string, error) {
+	req, err := http.NewRequest("POST", "https://slack.com/api/auth.test", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	resp.Body.Close()
+	return resp.Header.Get("X-OAuth-Scopes"), nil
 }
 
 // open follows the sessions of the Slack threads from the last record
