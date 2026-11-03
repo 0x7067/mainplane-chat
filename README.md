@@ -76,8 +76,8 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 
 | Command | |
 | --- | --- |
-| `/model` | show a picker of the connected models |
-| `/model <id> [message]` | continue in a new session on that model, with the same workers |
+| `/model` | show a picker of the connected models: the catalog's, then other models recent sessions used |
+| `/model <id> [message]` | continue in a new session on that model, with the same workers. Any `<provider>/<model>` of a connected provider works, catalog or not, with the session's tools and context limit |
 | `/continue [message]` | continue in a new session with the same config |
 | `/retry` | step a failed session again |
 | `/stop` | stop the running step |
@@ -89,7 +89,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 <details>
 <summary>Discord</summary>
 
-- A message in any channel starts a session in a new thread named `<session id> <first words>`. Its model is picked as the Mainplane terminal app picks it: the newest session's, else the catalog's default, if its provider is connected. Its workers are every connected worker.
+- A message in any channel starts a session in a new thread named `<session id> <first words>`. Its model is the one of the newest session a thread shows (or, before any thread has one, the newest session's), else the catalog's default, if its provider is connected. A model outside the catalog, such as a self-hosted provider's, starts with that session's config. Sessions made elsewhere, such as test runs, do not move the chats to their model. Its workers are every connected worker.
 - A session made outside Discord (terminal app, CLI, another agent) gets its own thread in `#sessions`, from when mirroring began. The bot finds the channel by name.
 - Messages sent from elsewhere show quoted with their source (`> **cli:** …`), and a background job's report shows as one line (`-# job on admin exited 0 after 40s`).
 - A thread whose session is deleted is archived and locked. In `#sessions`, its post is deleted too, so the channel lists live sessions. When a session gets a name, its thread is renamed `<id> <name>`.
