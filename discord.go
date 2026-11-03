@@ -151,7 +151,7 @@ func (d *discord) handle(m *discordgo.Message) {
 			}
 			return d.key(th.ID), nil
 		}
-		if err := d.b.start("discord", open, m.ID, text, files); err != nil {
+		if err := d.b.start("discord", open, m.ID, "", text, files); err != nil {
 			d.say(d.key(m.ChannelID), msg{Text: err.Error()})
 		}
 		return

@@ -146,3 +146,18 @@ func TestRunes(t *testing.T) {
 		t.Errorf("split lost text: %q", got)
 	}
 }
+
+func TestPartsPrefixOnlyWithContent(t *testing.T) {
+	b := &bridge{} // no harness: a session lookup fails, so no file type is accepted as an image
+	zip := file{name: "a.zip", ctype: "application/zip", size: 10}
+	if ps, skipped := b.parts("s1", "[pedro <@U09>]: ", "", []file{zip}); len(ps) != 0 || len(skipped) != 1 {
+		t.Errorf("file-only message with every file skipped: parts %d, skipped %v; want none sent", len(ps), skipped)
+	}
+	if ps, _ := b.parts("s1", "[pedro <@U09>]: ", "", nil); len(ps) != 0 {
+		t.Errorf("empty message sent %d parts", len(ps))
+	}
+	ps, _ := b.parts("s1", "[pedro <@U09>]: ", "hi", nil)
+	if len(ps) != 1 || string(ps[0].body) != "[pedro <@U09>]: hi" {
+		t.Errorf("text message = %v, want one part with the prefix", ps)
+	}
+}

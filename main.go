@@ -177,7 +177,7 @@ func (b *bridge) say(th string, m msg) { b.chat(th).say(th, m) }
 // thread command, else a message to the session.
 func (b *bridge) message(th, id, msgID, text string, files []file) {
 	if !b.command(th, id, msgID, text) {
-		b.post(th, id, msgID, text, files)
+		b.post(th, id, msgID, "", text, files)
 	}
 }
 
@@ -229,7 +229,8 @@ func (b *bridge) command(th, id, msgID, text string) bool {
 
 // start makes a session for a message in a channel, with the config newConf
 // picks; open makes the message's thread for the session and returns its key.
-func (b *bridge) start(via string, open func(id string) (string, error), msgID, text string, files []file) error {
+// prefix is as for post.
+func (b *bridge) start(via string, open func(id string) (string, error), msgID, prefix, text string, files []file) error {
 	conf, err := b.newConf()
 	if err != nil {
 		return fmt.Errorf("could not start a session: %w", err)
@@ -243,7 +244,7 @@ func (b *bridge) start(via string, open func(id string) (string, error), msgID, 
 		return fmt.Errorf("session %s started, but the thread failed: %w", id, err)
 	}
 	b.bind(th, id, 0)
-	b.post(th, id, msgID, text, files)
+	b.post(th, id, msgID, prefix, text, files)
 	return nil
 }
 
@@ -302,7 +303,7 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 	if text != "" {
 		m += "\n" + text
 	}
-	b.post(th, id, msgID, m, nil)
+	b.post(th, id, msgID, "", m, nil)
 	return id, nil
 }
 
@@ -581,9 +582,11 @@ func (b *bridge) create(conf statefile.Conf, via string) (string, error) {
 
 // post sends a chat message's text and files to the session, keyed by the
 // message so a repeat appends nothing, and makes sure the thread follows the
-// session. Each part is a record: the text, then each image.
-func (b *bridge) post(th, id, msgID, text string, files []file) {
-	parts, skipped := b.parts(id, text, files)
+// session. Each part is a record: the text, then each image. prefix (who wrote
+// it, from a chat that says) goes before the text only when the message has
+// something to send, so a message whose files were all skipped sends nothing.
+func (b *bridge) post(th, id, msgID, prefix, text string, files []file) {
+	parts, skipped := b.parts(id, prefix, text, files)
 	if len(skipped) > 0 {
 		b.say(th, msg{Note: "not sent: " + strings.Join(skipped, ", ")})
 	}
@@ -625,7 +628,7 @@ type part struct {
 
 // parts is what a message sends: its text, with text files inlined, then the
 // images the session's model takes. The rest are skipped, by file name.
-func (b *bridge) parts(id, text string, files []file) ([]part, []string) {
+func (b *bridge) parts(id, prefix, text string, files []file) ([]part, []string) {
 	var input []string
 	if len(files) > 0 {
 		if i, err := b.info(id); err == nil {
@@ -654,8 +657,12 @@ func (b *bridge) parts(id, text string, files []file) ([]part, []string) {
 			skipped = append(skipped, f.name)
 		}
 	}
+	text = strings.TrimSpace(text)
+	if text == "" && len(images) == 0 {
+		return nil, skipped
+	}
 	var ps []part
-	if text = strings.TrimSpace(text); text != "" {
+	if text = strings.TrimSpace(prefix + text); text != "" {
 		ps = append(ps, part{"text/plain", []byte(text)})
 	}
 	return append(ps, images...), skipped
