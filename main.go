@@ -359,6 +359,13 @@ func historyOverflow(body string, used int) bool {
 	return request > 0 && window > 0 && (request-used)*2 < window
 }
 
+// fresh is whether an error is recent enough to continue its session: one
+// replayed when the bot comes back, say after a restart, may be long settled,
+// and continuing it then restarts work nobody is waiting for.
+func fresh(at, now time.Time) bool {
+	return now.Sub(at) < 10*time.Minute
+}
+
 // endedFull is whether a session's error record ends it full, so the bot continues it.
 func (b *bridge) endedFull(id, body string) bool {
 	if contextFull(body) {
@@ -848,7 +855,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.rename(th, id, string(r.Body))
 		}
 	case statefile.Error:
-		full := r.Via == "" && b.shows(th, id) && b.endedFull(id, string(r.Body))
+		full := r.Via == "" && fresh(r.Time, time.Now()) && b.shows(th, id) && b.endedFull(id, string(r.Body))
 		text := "⚠️ " + string(r.Body)
 		outcome := "failed"
 		switch {
@@ -857,7 +864,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		case full:
 			// What the full session wrote goes out first, above the notice.
 			if len(t.text) > 0 {
-				b.reply(th, strings.Join(t.text, "\n\n"), t.key, false)
+				b.reply(th, strings.Join(t.text, "\n\n"), t.key, time.Since(t.start) > 2*time.Minute)
 				t.text = nil
 			}
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})

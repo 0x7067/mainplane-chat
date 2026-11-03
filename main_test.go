@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
@@ -223,5 +224,15 @@ func TestMarks(t *testing.T) {
 	}
 	if mark, _ := marks([]string{"m1"}, nil, "failed"); !slices.Equal(mark, []string{"m1"}) {
 		t.Errorf("failed after a continuation: mark %v, want [m1]", mark)
+	}
+}
+
+func TestFresh(t *testing.T) {
+	now := time.Date(2026, 11, 3, 11, 52, 0, 0, time.UTC)
+	if !fresh(now.Add(-30*time.Second), now) {
+		t.Error("an error 30 s old (the bot restarted meanwhile) must continue")
+	}
+	if fresh(now.Add(-31*time.Minute), now) {
+		t.Error("an error 31 min old, replayed after a restart, must not continue")
 	}
 }
