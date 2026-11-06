@@ -27,6 +27,7 @@ func sessionContext(th, id string) string {
 	if platform(th) == "slack" {
 		channel, ts := threadParts(th)
 		note += " This Slack conversation is channel " + channel + ", thread " + ts + "; the bridge routes your replies there."
+		note += " " + slackDeliveryNote
 	}
 	return note + " Other Mainplane sessions are separate conversations, not Slack destinations. Use mainplane sessions to discover them and mainplane info <id> to inspect current status; do not guess your current id from the newest session. Sending mainplane message <id> adds model input to that session, not a chat reply. The bridge handles chat delivery and continuations.)"
 }

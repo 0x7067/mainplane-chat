@@ -451,10 +451,13 @@ func (s *slackChat) renamed(ev *slackevents.AgentSessionTitleChangedEvent) {
 // markdown block's limit, its files, then its note small, with its Retry
 // button and model picker. A failure that offers Retry suspends the agent
 // session, as it waits for the user.
-func (s *slackChat) say(th string, m msg) {
+func (s *slackChat) say(th string, m msg) error {
+	var errs []error
 	channel, ts := threadParts(th)
 	for _, part := range split(strings.TrimSpace(m.Text), 11000) {
-		s.post(channel, ts, firstWords(part, 300), slack.NewMarkdownBlock("", part))
+		if err := s.post(channel, ts, firstWords(part, 300), slack.NewMarkdownBlock("", part)); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	note := m.Note
 	for _, f := range m.Files {
@@ -464,10 +467,19 @@ func (s *slackChat) say(th string, m msg) {
 			if f.topLevel {
 				thread = ""
 			}
-			_, err = s.sl.UploadFile(slack.UploadFileParameters{Reader: bytes.NewReader(data), FileSize: len(data), Filename: f.name, Channel: channel, ThreadTimestamp: thread})
+			var uploaded *slack.FileSummary
+			uploaded, err = s.sl.UploadFile(slack.UploadFileParameters{Reader: bytes.NewReader(data), FileSize: len(data), Filename: f.name, Channel: channel, ThreadTimestamp: thread})
+			if err == nil && f.topLevel {
+				receipt := "Uploaded " + html.EscapeString(f.name) + " as a top-level file in this channel."
+				if info, _, _, lookupErr := s.sl.GetFileInfo(uploaded.ID, 1, 1); lookupErr == nil && info.Permalink != "" {
+					receipt += " <" + info.Permalink + "|Open file>"
+				}
+				note = strings.TrimSpace(note + "\n" + receipt)
+			}
 		}
 		if err != nil {
 			note = strings.TrimSpace(note + "\ncould not attach " + f.name + ": " + err.Error())
+			errs = append(errs, err)
 		}
 	}
 	var blocks []slack.Block
@@ -478,11 +490,14 @@ func (s *slackChat) say(th string, m msg) {
 		blocks = append(blocks, c)
 	}
 	if len(blocks) > 0 {
-		s.post(channel, ts, firstWords(cmp.Or(note, "Retry or continue on another model"), 300), blocks...)
+		if err := s.post(channel, ts, firstWords(cmp.Or(note, "Retry or continue on another model"), 300), blocks...); err != nil {
+			errs = append(errs, err)
+		}
 	}
 	if m.Retry {
 		s.setStatus(th, "suspended")
 	}
+	return errors.Join(errs...)
 }
 
 // slackControls is m's Retry button and model picker, in an actions block
@@ -515,10 +530,12 @@ func slackControls(m msg) slack.Block {
 	return slack.NewActionBlock(m.Session, els...)
 }
 
-func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) {
-	if _, _, err := s.sl.PostMessage(channel, slack.MsgOptionTS(ts), slack.MsgOptionText(fallback, false), slack.MsgOptionBlocks(blocks...)); err != nil {
+func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) error {
+	_, _, err := s.sl.PostMessage(channel, slack.MsgOptionTS(ts), slack.MsgOptionText(fallback, false), slack.MsgOptionBlocks(blocks...))
+	if err != nil {
 		log.Printf("slack send: %v", err)
 	}
+	return err
 }
 
 // status posts or edits the turn's status message: a plan block with a task
@@ -764,7 +781,7 @@ func frame(bot, where, author, user string) string {
 	return "(Note from the Slack bridge: you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
 		". What you write is posted to the thread as Slack messages, so use Slack formatting. Several people may write here; " +
 		"each message starts with its author's name and Slack mention, and writing a mention such as <@" + user +
-		"> notifies that person. " + slackDeliveryNote + ")\n\n" + line
+		"> notifies that person.)\n\n" + line
 }
 
 const slackDeliveryNote = "To send a file, put a standalone line attach: /absolute/path in your assistant reply (not in shell output, a tool call, or a code block). The bridge uploads it to this thread. For a top-level file in this same channel, use attach-channel: /absolute/path instead. Files must exist on the bridge's machine; copy files from other workers there first. You do not need Slack tokens or API calls. Do not send files into a Mainplane session with mainplane message: that is model input, not a Slack upload. Do not claim delivery without emitting the attachment line; upload errors are reported in Slack."

@@ -207,7 +207,8 @@ func (d *discord) mirror(id, from, model, first string) (string, error) {
 // say sends m in Discord-sized pieces, link previews off. Its note lines are
 // subtext, its files and controls come with the last piece, and a reply
 // notifies only when m says so.
-func (d *discord) say(th string, m msg) {
+func (d *discord) say(th string, m msg) error {
+	var errs []error
 	ch := d.id(th)
 	content := m.Text
 	if m.Note != "" {
@@ -234,6 +235,7 @@ func (d *discord) say(th string, m msg) {
 		data, err := f.fetch()
 		if err != nil {
 			log.Printf("attach %s: %v", f.name, err)
+			errs = append(errs, err)
 			continue
 		}
 		files = append(files, &discordgo.File{Name: f.name, Reader: bytes.NewReader(data)})
@@ -253,8 +255,10 @@ func (d *discord) say(th string, m msg) {
 		}
 		if _, err := d.dc.ChannelMessageSendComplex(ch, s); err != nil {
 			log.Printf("discord send: %v", err)
+			errs = append(errs, err)
 		}
 	}
+	return errors.Join(errs...)
 }
 
 // controls are m's Retry button and model picker, which name the thread

@@ -81,13 +81,15 @@ type state struct {
 }
 
 type thread struct {
-	Session string `json:"session"`
-	N       int    `json:"n"` // the newest record relayed
+	Session            string `json:"session"`
+	N                  int    `json:"n"` // the newest record relayed
+	AttachmentPending  bool   `json:"attachment_pending,omitempty"`
+	AttachmentRecovery bool   `json:"attachment_recovery,omitempty"`
 }
 
 // chat is what the core needs of a chat app. th is a thread's key.
 type chat interface {
-	say(th string, m msg)
+	say(th string, m msg) error
 	// status posts or edits the turn's status message; t.done shrinks it, and
 	// comes at the end of every turn, with or without a status message.
 	status(th, id string, t *turn)
@@ -194,7 +196,7 @@ func platform(key string) string {
 
 func (b *bridge) chat(th string) chat { return b.chats[platform(th)] }
 
-func (b *bridge) say(th string, m msg) { b.chat(th).say(th, m) }
+func (b *bridge) say(th string, m msg) error { return b.chat(th).say(th, m) }
 
 // message handles a message sent in thread th, which shows session id: a
 // thread command, else a message to the session.
@@ -355,10 +357,6 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 	}
 	m := continuePrefix + old + ". Continue the task using the handoff below; retrieve older context only if a specific fact is missing."
 	m += "\n\n" + continuationContext(contextRecords)
-	if platform(th) == "slack" {
-		channel, ts := threadParts(th)
-		m += "\n\nSlack conversation: channel " + channel + ", thread " + ts + ". " + slackDeliveryNote
-	}
 	if paths := b.logPaths(old, cur.Config); len(paths) > 0 {
 		m += "\nOlder records (only if needed): " + strings.Join(paths, ", ") + ". " + logFormatNote
 	}
@@ -837,7 +835,9 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 				}
 			}
 			if accepted >= len(parts) {
-				b.chat(th).react(th, msgID, seen)
+				if !bridgeMessage(msgID) {
+					b.chat(th).react(th, msgID, seen)
+				}
 				b.follow(th, id, first-1)
 				return nil
 			}
@@ -845,7 +845,9 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 		b.say(th, msg{Text: "send failed: " + err.Error()})
 		return err
 	}
-	b.chat(th).react(th, msgID, seen)
+	if !bridgeMessage(msgID) {
+		b.chat(th).react(th, msgID, seen)
+	}
 	b.follow(th, id, out.N-len(parts)) // from the message itself, the reply's target
 	return nil
 }
@@ -922,13 +924,14 @@ func (b *bridge) follow(th, id string, n int) {
 	k := [2]string{th, id}
 	running := b.following[k]
 	b.following[k] = true
+	saved := b.st.Threads[th]
 	b.mu.Unlock()
 	if running {
 		return
 	}
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, k); b.mu.Unlock() }()
-		var t turn
+		t := turn{attachmentExpected: saved.AttachmentPending, deliveryRecovery: saved.AttachmentRecovery}
 		for {
 			// Calls not shown yet, held back by the status throttle, show after a
 			// short poll at most.
@@ -981,10 +984,16 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		t.text = append(t.text, string(r.Body))
 	case statefile.Step:
 		if t.stepCalls > 0 {
-			b.reply(th, strings.Join(t.text, "\n\n"), "", false)
+			text := strings.Join(t.text, "\n\n")
+			err := b.reply(th, text, "", false)
+			t.deliveryErr = errors.Join(t.deliveryErr, err)
+			if err == nil && hasAttachment(text) {
+				t.attachmentExpected = false
+				b.deliveryState(th, id, t)
+			}
 			t.text, t.stepCalls = nil, 0
 		} else if provider.Normal(r.Header) {
-			b.finish(th, id, t, "")
+			b.finishStep(th, id, t, r)
 		}
 	case statefile.Message:
 		// A message the thread sent: the turn's reply answers it. One sent
@@ -992,7 +1001,12 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		b.mu.Lock()
 		mine := r.Via == platform(th) && b.sentIn[r.IdempotencyKey] == th
 		b.mu.Unlock()
-		if mine && r.IdempotencyKey != "" && !strings.HasPrefix(r.IdempotencyKey, fullKey) && r.IdempotencyKey != t.key {
+		internal := bridgeMessage(r.IdempotencyKey)
+		if strings.HasPrefix(r.IdempotencyKey, deliveryKey) {
+			t.deliveryRecovery, t.attachmentExpected = true, true
+			b.deliveryState(th, id, t)
+		}
+		if mine && r.IdempotencyKey != "" && !internal && r.IdempotencyKey != t.key {
 			t.key = r.IdempotencyKey
 			t.asked = append(t.asked, r.IdempotencyKey)
 		}
@@ -1001,7 +1015,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		switch {
 		case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Note: jobLine(string(r.Body))})
-		case !mine && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
+		case !mine && !internal && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
 			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
 		}
 		// Every turn asked or retried, from anywhere, shows on the thread itself.
@@ -1063,7 +1077,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		t.calls++
 		t.stepCalls++
 		title, detail := callParts(r.Body)
-		t.tasks = append(t.tasks, task{r.ID, title, detail, "in_progress"})[max(0, len(t.tasks)+1-maxTasks):]
+		t.tasks = append(t.tasks, task{id: r.ID, title: title, detail: detail, status: "in_progress", attachment: attachmentCall(r.Body)})[max(0, len(t.tasks)+1-maxTasks):]
 		t.dirty = true
 	case statefile.Result:
 		for i := range t.tasks {
@@ -1071,6 +1085,10 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 				t.tasks[i].status = "complete"
 				if (r.Exit != nil && *r.Exit != 0) || (r.Exit == nil && bytes.HasPrefix(r.Body, []byte("error: "))) {
 					t.tasks[i].status = "error"
+				}
+				if t.tasks[i].attachment && t.tasks[i].status == "complete" && hasAttachment(string(r.Body)) {
+					t.attachmentExpected = true
+					b.deliveryState(th, id, t)
 				}
 				t.dirty = true
 			}
@@ -1081,16 +1099,19 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 // turn is what a follower shows of the agent's work since a person last
 // spoke: one status message, edited as calls come, and then the reply.
 type turn struct {
-	start     time.Time
-	key       string   // the chat message the reply answers, if any
-	asked     []string // the chat messages of the turn, to mark done
-	calls     int      // tool calls so far
-	stepCalls int      // calls of the step not yet closed
-	tasks     []task   // the newest calls, at most maxTasks
-	text      []string // text of the step not yet closed
-	status    string   // the status message, once posted
-	dirty     bool     // calls the status message does not show yet
-	shown     time.Time
+	start              time.Time
+	key                string   // the chat message the reply answers, if any
+	asked              []string // the chat messages of the turn, to mark done
+	calls              int      // tool calls so far
+	stepCalls          int      // calls of the step not yet closed
+	tasks              []task   // the newest calls, at most maxTasks
+	text               []string // text of the step not yet closed
+	status             string   // the status message, once posted
+	dirty              bool     // calls the status message does not show yet
+	shown              time.Time
+	attachmentExpected bool  // a run call only printed the delivery directive
+	deliveryRecovery   bool  // one corrective model step has already been requested
+	deliveryErr        error // any progress reply/attachment that failed to send
 
 	// Set when the turn is done, for its last status.
 	done    bool
@@ -1101,7 +1122,10 @@ type turn struct {
 
 // task is one call of a turn: its tool and worker, its command or path, and
 // its status: in_progress, complete or error.
-type task struct{ id, title, detail, status string }
+type task struct {
+	id, title, detail, status string
+	attachment                bool
+}
 
 // maxTasks is the most calls a turn keeps, as many as a Slack plan block holds.
 const maxTasks = 50
@@ -1111,6 +1135,15 @@ const maxTasks = 50
 // reply after a long turn notifies its author. outcome is "", "failed",
 // "stopped" or "continued" (the session was full and goes on in a new one).
 func (b *bridge) finish(th, id string, t *turn, outcome string) {
+	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
+	if text != "" {
+		if err := b.reply(th, text, key, time.Since(t.start) > 2*time.Minute); err != nil && outcome == "" {
+			outcome = "failed"
+		}
+	}
+	if t.deliveryErr != nil && outcome == "" {
+		outcome = "failed"
+	}
 	took := time.Since(t.start).Round(time.Second)
 	t.done, t.outcome, t.took, t.used = true, outcome, took, -1
 	if t.status != "" && outcome == "" {
@@ -1119,16 +1152,16 @@ func (b *bridge) finish(th, id string, t *turn, outcome string) {
 		}
 	}
 	b.chat(th).status(th, id, t)
-	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
+	if outcome != "continued" {
+		t.attachmentExpected, t.deliveryRecovery = false, false
+	}
+	b.deliveryState(th, id, t)
 	*t = turn{}
 	b.mu.Lock()
 	asked, b.carried[th] = marks(b.carried[th], asked, outcome)
 	b.mu.Unlock()
 	for _, m := range asked {
 		b.chat(th).react(th, m, reaction(outcome))
-	}
-	if text != "" {
-		b.reply(th, text, key, took > 2*time.Minute)
 	}
 }
 
@@ -1159,9 +1192,10 @@ func reaction(outcome string) string {
 
 // reply posts the agent's text. A line "attach: /path" sends that file from
 // this machine with it, in place of the line.
-func (b *bridge) reply(th, text, replyTo string, notify bool) {
+func (b *bridge) reply(th, text, replyTo string, notify bool) error {
 	var lines, notes []string
 	var files []file
+	var errs []error
 	fence := ""
 	for _, l := range strings.Split(text, "\n") {
 		trimmed := strings.TrimSpace(l)
@@ -1196,15 +1230,16 @@ func (b *bridge) reply(th, text, replyTo string, notify bool) {
 		}
 		if err != nil {
 			notes = append(notes, "could not attach: "+err.Error())
+			errs = append(errs, err)
 			continue
 		}
 		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }, topLevel: topLevel})
 	}
 	text = strings.TrimSpace(strings.Join(lines, "\n"))
 	if text == "" && len(notes) == 0 && len(files) == 0 {
-		return
+		return nil
 	}
-	b.say(th, msg{Text: text, Note: strings.Join(notes, "\n"), ReplyTo: replyTo, Notify: notify, Files: files})
+	return errors.Join(errors.Join(errs...), b.say(th, msg{Text: text, Note: strings.Join(notes, "\n"), ReplyTo: replyTo, Notify: notify, Files: files}))
 }
 
 // The bot's reaction on a message the session was sent: seen while the
@@ -1283,7 +1318,11 @@ func (b *bridge) bind(th, id string, n int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if t := b.st.Threads[th]; t.Session != id || n > t.N {
-		b.st.Threads[th] = thread{id, n}
+		if t.Session != id {
+			t = thread{Session: id}
+		}
+		t.N = n
+		b.st.Threads[th] = t
 		b.save()
 	}
 }
@@ -1294,7 +1333,8 @@ func (b *bridge) advance(th, id string, n int) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if t := b.st.Threads[th]; t.Session == id && n > t.N {
-		b.st.Threads[th] = thread{id, n}
+		t.N = n
+		b.st.Threads[th] = t
 		b.save()
 	}
 }

@@ -29,7 +29,7 @@ func (c *console) print(s string) {
 	fmt.Fprintln(c.out, s)
 }
 
-func (c *console) say(th string, m msg) {
+func (c *console) say(th string, m msg) error {
 	lines := []string{"say: " + m.Text}
 	if m.Note != "" {
 		lines = append(lines, "  note: "+m.Note)
@@ -48,6 +48,7 @@ func (c *console) say(th string, m msg) {
 		lines = append(lines, "  [models: "+strings.Join(names, ", ")+"]")
 	}
 	c.print(strings.Join(lines, "\n"))
+	return nil
 }
 
 func (c *console) status(th, id string, t *turn) {
