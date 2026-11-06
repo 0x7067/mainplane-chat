@@ -295,3 +295,30 @@ func TestAcceptedMessageWithLostResponse(t *testing.T) {
 		t.Fatal("accepted message was lost or reported failed")
 	}
 }
+
+func TestPartialMultipartSendIsNotComplete(t *testing.T) {
+	b, _ := testCore(t)
+	b.following[[2]string{"slack:C1/1.0", "eeeeeeee"}] = true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == "POST" {
+			http.Error(w, "partial response", 503)
+			return
+		}
+		if !strings.HasSuffix(r.URL.Path, "/records") {
+			json.NewEncoder(w).Encode(info{Config: statefile.Conf{Input: []string{"image/png"}}})
+			return
+		}
+		// The text was accepted, but the image was not.
+		data, _ := statefile.Encode(statefile.Record{Header: statefile.Header{N: 6, Kind: statefile.Message, IdempotencyKey: "original-message"}})
+		w.Write(data)
+	}))
+	defer srv.Close()
+	b.harness = srv.URL
+	image := file{name: "proof.png", ctype: "image/png", size: 3, fetch: func() ([]byte, error) { return []byte("png"), nil }}
+	if err := b.post("slack:C1/1.0", "eeeeeeee", "original-message", "", "hello", []file{image}); err == nil {
+		t.Fatal("partially accepted multipart message reported complete")
+	}
+	if b.sessionFor("slack:C1/1.0") != "abcd1234" {
+		t.Fatal("partial message moved the thread")
+	}
+}

@@ -827,12 +827,19 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 		// The harness may have accepted the idempotent message before the
 		// connection/response failed. Reattach instead of creating duplicates.
 		if recs, lookupErr := b.records(id, 0, ""); lookupErr == nil {
+			first, accepted := 0, 0
 			for _, r := range recs {
 				if r.Kind == statefile.Message && msgID != "" && r.IdempotencyKey == msgID {
-					b.chat(th).react(th, msgID, seen)
-					b.follow(th, id, r.N-1)
-					return nil
+					if first == 0 {
+						first = r.N
+					}
+					accepted++
 				}
+			}
+			if accepted >= len(parts) {
+				b.chat(th).react(th, msgID, seen)
+				b.follow(th, id, first-1)
+				return nil
 			}
 		}
 		b.say(th, msg{Text: "send failed: " + err.Error()})
