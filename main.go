@@ -813,7 +813,7 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 	if len(parts) == 0 {
 		return nil
 	}
-	if platform(th) == "slack" && isTS(msgID) && !bridgeMessage(msgID) {
+	if platform(th) == "slack" && isTS(msgID) && !bridgeMessage(msgID) && !strings.HasPrefix(text, continuePrefix) {
 		b.mu.Lock()
 		if current, ok := b.st.Threads[th]; ok {
 			current.Request = msgID

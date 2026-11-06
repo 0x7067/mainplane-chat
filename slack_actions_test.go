@@ -246,6 +246,30 @@ func TestSlackRequestIdentitySurvivesContinuation(t *testing.T) {
 	}
 }
 
+func TestManualContinuationDoesNotChangeSendIdempotencyScope(t *testing.T) {
+	b, _ := testCore(t)
+	const th, id = "slack:C1/1.0", "abcd1234"
+	current := b.st.Threads[th]
+	current.Request = "1793980000.000001"
+	b.st.Threads[th] = current
+	b.following[[2]string{th, id}] = true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { fmt.Fprint(w, `{"n":6}`) }))
+	defer srv.Close()
+	b.harness = srv.URL
+	if err := b.post(th, id, "1793980001.000001", "", continuePrefix+"eeeeeeee. Continue the task.", nil); err != nil {
+		t.Fatal(err)
+	}
+	if b.st.Threads[th].Request != current.Request {
+		t.Fatal("manual continuation changed the pending request scope")
+	}
+	if err := b.post(th, id, "1793980002.000001", "", "a genuinely new request", nil); err != nil {
+		t.Fatal(err)
+	}
+	if b.st.Threads[th].Request != "1793980002.000001" {
+		t.Fatal("new chat request did not get a fresh scope")
+	}
+}
+
 func TestSenderErrorsDoNotLeakSignedURLsOrCredentials(t *testing.T) {
 	input := `Post "https://files.slack.com/upload/v1/private-signature?secret=abc": timeout xoxb-test-token`
 	got := slackErrorSecrets.ReplaceAllString(input, "[redacted]")
