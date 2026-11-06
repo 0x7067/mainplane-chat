@@ -224,6 +224,28 @@ func TestSlackCLIRejectsInvalidActionWithoutCredentials(t *testing.T) {
 	}
 }
 
+func TestSlackSenderHelpNeedsNoCredentialsAndIsNotAnAction(t *testing.T) {
+	t.Setenv("SLACK_BOT_TOKEN", "")
+	var out bytes.Buffer
+	if err := runSlackCLI([]string{"post", "--help"}, &out); err != nil || !strings.Contains(out.String(), "usage:") {
+		t.Fatalf("help failed: %v %s", err, out.String())
+	}
+	if slackActionCall([]byte(`{"name":"run","arguments":{"code":"mainplane-chat slack post --help"}}`)) {
+		t.Fatal("help was treated as an attempted send")
+	}
+}
+
+func TestSlackRequestIdentitySurvivesContinuation(t *testing.T) {
+	b, _ := testCore(t)
+	th := b.st.Threads["slack:C1/1.0"]
+	th.Request = "1793980000.000001"
+	b.st.Threads["slack:C1/1.0"] = th
+	b.bind("slack:C1/1.0", "eeeeeeee", 0)
+	if b.st.Threads["slack:C1/1.0"].Request != th.Request {
+		t.Fatal("continuation lost request idempotency scope")
+	}
+}
+
 func TestUnconfirmedNativeActionCannotClaimSent(t *testing.T) {
 	b, c := testCore(t)
 	tr := &turn{}

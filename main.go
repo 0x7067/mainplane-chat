@@ -144,7 +144,12 @@ func main() {
 	try := flag.Bool("console", false, "try this build in the terminal against the harness: stdin lines are messages in one thread, and what the bot would post is printed; no chat tokens needed, and the bot's state is not touched")
 	session := flag.String("session", "", "with -console: show this session in the thread instead of starting one")
 	wait := flag.Duration("wait", 10*time.Minute, "with -console: how long to wait at the end of input for the session to stop working")
+	slackHelp := flag.Bool("slack-help", false, "show executable Slack sender commands without starting the service")
 	flag.Parse()
+	if *slackHelp {
+		runSlackCLI([]string{"help"}, os.Stdout)
+		return
+	}
 	b := &bridge{
 		harness:   envOr("MAINPLANE_URL", "http://127.0.0.1:8080"),
 		key:       secret(mustEnv("MAINPLANE_KEY")),

@@ -82,6 +82,9 @@ func runSlackCLI(args []string, out io.Writer) error {
 	fs.StringVar(&a.Session, "session", os.Getenv("MAINPLANE_SESSION"), "default: MAINPLANE_SESSION")
 	fs.StringVar(&a.Key, "key", "", "explicit operation name, or receipt id for receipt")
 	if err := fs.Parse(args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return runSlackCLI([]string{"help"}, out)
+		}
 		return finish(slackReceipt{}, err)
 	}
 	if fs.NArg() != 0 {

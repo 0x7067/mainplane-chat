@@ -99,7 +99,7 @@ func slackActionCall(body []byte) bool {
 		return false
 	}
 	for _, key := range []string{"code", "command"} {
-		if code, ok := call.Arguments[key].(string); ok && (strings.Contains(code, "mainplane-chat slack post") || strings.Contains(code, "mainplane-chat slack reply")) {
+		if code, ok := call.Arguments[key].(string); ok && !strings.Contains(code, "--help") && !strings.Contains(code, " -h") && (strings.Contains(code, "mainplane-chat slack post") || strings.Contains(code, "mainplane-chat slack reply")) {
 			return true
 		}
 	}
