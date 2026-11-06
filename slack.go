@@ -206,6 +206,10 @@ func (s *slackChat) act(cb slack.InteractionCallback) {
 	}
 	th := s.thread(cb.Container.ChannelID, cb.Container.ThreadTs)
 	for _, a := range cb.ActionCallback.BlockActions {
+		if a.BlockID != s.b.sessionFor(th) {
+			s.say(th, msg{Note: "This control belongs to a previous session. Use !retry or !model in this thread for the current session."})
+			continue
+		}
 		text := "!" + a.ActionID
 		if a.ActionID == "model" {
 			text += " " + a.SelectedOption.Value
@@ -456,7 +460,11 @@ func (s *slackChat) say(th string, m msg) {
 	for _, f := range m.Files {
 		data, err := f.fetch()
 		if err == nil {
-			_, err = s.sl.UploadFile(slack.UploadFileParameters{Reader: bytes.NewReader(data), FileSize: len(data), Filename: f.name, Channel: channel, ThreadTimestamp: ts})
+			thread := ts
+			if f.topLevel {
+				thread = ""
+			}
+			_, err = s.sl.UploadFile(slack.UploadFileParameters{Reader: bytes.NewReader(data), FileSize: len(data), Filename: f.name, Channel: channel, ThreadTimestamp: thread})
 		}
 		if err != nil {
 			note = strings.TrimSpace(note + "\ncould not attach " + f.name + ": " + err.Error())
@@ -519,13 +527,16 @@ func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) {
 // not show.
 func (s *slackChat) status(th, id string, t *turn) {
 	title := planTitle(id, t)
+	current := s.b.shows(th, id)
 	if t.done {
 		// The agent session is ready for the next message.
-		s.setStatus(th, "active")
+		if current {
+			s.setStatus(th, "active")
+		}
 		if t.status == "" {
 			return
 		}
-	} else {
+	} else if current {
 		s.mu.Lock()
 		stale := time.Since(s.processing[th]) > keepProcessing
 		s.mu.Unlock()
@@ -753,8 +764,10 @@ func frame(bot, where, author, user string) string {
 	return "(Note from the Slack bridge: you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
 		". What you write is posted to the thread as Slack messages, so use Slack formatting. Several people may write here; " +
 		"each message starts with its author's name and Slack mention, and writing a mention such as <@" + user +
-		"> notifies that person.)\n\n" + line
+		"> notifies that person. " + slackDeliveryNote + ")\n\n" + line
 }
+
+const slackDeliveryNote = "To send a file, put a standalone line attach: /absolute/path in your assistant reply (not in shell output, a tool call, or a code block). The bridge uploads it to this thread. For a top-level file in this same channel, use attach-channel: /absolute/path instead. Files must exist on the bridge's machine; copy files from other workers there first. You do not need Slack tokens or API calls. Do not send files into a Mainplane session with mainplane message: that is model input, not a Slack upload. Do not claim delivery without emitting the attachment line; upload errors are reported in Slack."
 
 // fullMember is a person with a regular account in the given workspace: not a
 // guest (single- or multi-channel), not from another organization through

@@ -20,10 +20,10 @@
 
 - **A thread per session.** A message in a channel (Discord), or a DM or a mention of the app in a Slack channel or group DM, starts a session in a thread. Replies in the thread continue it (in a Slack channel or group DM, only replies that mention the app).
 - **Live status.** One message shows the running turn: its time, its last tool calls and a Stop button. When the turn ends, it shrinks to one line: `14 calls · 2m31s · 38% context`.
-- **Files in both directions.** Send images and text files with a message. The agent sends a file back with a line `attach: /path/to/file` in its reply.
+- **Files in both directions.** Send images and text files with a message. The agent sends a file back with a standalone line `attach: /path/to/file` in its reply (not shell output or a code block). In Slack, `attach-channel: /path/to/file` shares it as a top-level file in the same channel.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
 - **Recovery.** A failed step comes with a Retry button and a model picker. When a provider's quota runs out, continue on another model in one click.
-- **No context limit.** When a session fills its context, the bot continues it in a new session and passes on the last message. The thread follows. A provider that refuses a request longer than its context window (llama-server's `exceed_context_size_error`, OpenAI's `context_length_exceeded`) counts as full too when the sizes in its error show the history filled the window: what the request adds over the session's last context is under half the window. One oversized message keeps Retry.
+- **Context recovery.** When a session fills its context, the bot continues it in a new session with a bounded handoff of the requests and recent tool results. The thread follows. Provider context errors count as full when the history, including the last generated output, filled the window; a length-limited step that fills the session also continues. One oversized message keeps Retry. Retry recovers a full session even after downtime. If a fresh automatic continuation fills before making progress, the bot stops rather than looping.
 - **Catches up.** What happens while the bot is down is picked up when it starts again.
 - **Slack agent sessions.** In Slack, a thread is a native agent session, with its title, working state and Stop button.
 
@@ -116,8 +116,10 @@ printf 'list the files in /tmp\n' | MAINPLANE_KEY=... mainplane-chat -console
 - A top-level DM to the app starts a session in its thread, which is a Slack agent session. Slack shows its title (the first words, then the session's name), its working state and a Stop button. A title changed in Slack names the session.
 - In a group DM, private channel or channel the app is in, it hears only messages that mention it, in its own threads too, so people can talk there without the agent answering each message. A mention in a thread it runs continues that session; elsewhere it starts one in the thread it is in (its own thread, or the thread it replies in). The mention is left out of the text the agent gets. Other chatter is ignored.
 - The agent gets each Slack message as `[<name> <@id>]: <text>`, and a session's first message opens with a note that it is a Slack app, where the thread is (DM, group DM and who is in it, or #channel), and that its replies are Slack messages. Thread commands (`!model`, `/stop`, ...) are not framed.
+- Each message also names its exact current Mainplane session, Slack channel and thread. Other sessions remain separate conversations; the agent can inspect them with `mainplane sessions` and `mainplane info`, rather than mistaking the newest session for itself.
 - Only users in `MAINPLANE_SLACK_USERS` are heard; with `*`, so is every full member of the workspace (checked with `users.info`, cached ten minutes). A reply also sent to the DM counts.
 - Status, quotes, job lines, files, `attach:`, Retry, the model picker, auto-continue and following continuations work as in Discord. Remote files (shared from outside Slack) are not fetched.
+- `attach-channel:` uploads a file at the top level of this same channel (or DM); ordinary replies and `attach:` remain in the thread. The file must be on the bridge's machine, not just another worker. Old Retry/model controls cannot restart a session the thread has already left.
 - The finished status line carries the session id, as the Slack title does not. Messages get ✅ or ❌ when their turn ends. A failed step marks the agent session suspended.
 - Sessions made in Slack stay in Slack: `#sessions` mirrors only sessions made outside the chats.
 

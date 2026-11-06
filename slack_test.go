@@ -1,6 +1,11 @@
 package main
 
 import (
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"regexp"
 	"slices"
@@ -94,11 +99,81 @@ func TestFrame(t *testing.T) {
 		"you are symphony, an app in Slack",
 		"a Slack thread in a group DM with pedro, gabrielg",
 		"Slack formatting",
+		"attach: /absolute/path in your assistant reply",
+		"attach-channel: /absolute/path",
+		"not in shell output",
+		"You do not need Slack tokens",
 		"\n\n[pedro <@U09>]: what can you do",
 	} {
 		if !strings.Contains(first, want) {
 			t.Errorf("first message lacks %q:\n%s", want, first)
 		}
+	}
+}
+
+func TestSlackFileDestinations(t *testing.T) {
+	for _, topLevel := range []bool{false, true} {
+		t.Run(fmt.Sprint(topLevel), func(t *testing.T) {
+			var completed bool
+			var base string
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				switch r.URL.Path {
+				case "/files.getUploadURLExternal":
+					json.NewEncoder(w).Encode(map[string]any{"ok": true, "file_id": "F1", "upload_url": base + "/upload"})
+				case "/upload":
+					io.Copy(io.Discard, r.Body)
+					fmt.Fprint(w, "ok")
+				case "/files.completeUploadExternal":
+					r.ParseForm()
+					if r.Form.Get("channel_id") != "C1" {
+						t.Errorf("channel=%q", r.Form.Get("channel_id"))
+					}
+					want := "1.0"
+					if topLevel {
+						want = ""
+					}
+					if r.Form.Get("thread_ts") != want {
+						t.Errorf("thread_ts=%q want %q", r.Form.Get("thread_ts"), want)
+					}
+					completed = true
+					fmt.Fprint(w, `{"ok":true,"files":[{"id":"F1"}]}`)
+				default:
+					t.Errorf("unexpected Slack call %s", r.URL.Path)
+					fmt.Fprint(w, `{"ok":false,"error":"unexpected"}`)
+				}
+			}))
+			defer srv.Close()
+			base = srv.URL
+			s := &slackChat{sl: slack.New("test", slack.OptionAPIURL(base+"/"))}
+			s.say("slack:C1/1.0", msg{Files: []file{{name: "test.txt", topLevel: topLevel, fetch: func() ([]byte, error) { return []byte("proof"), nil }}}})
+			if !completed {
+				t.Fatal("file never shared")
+			}
+		})
+	}
+}
+
+func TestSlackStaleControl(t *testing.T) {
+	b, _ := testCore(t)
+	var posted string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat.postMessage" {
+			t.Errorf("stale action called %s", r.URL.Path)
+		}
+		r.ParseForm()
+		posted = r.Form.Get("text")
+		fmt.Fprint(w, `{"ok":true,"ts":"3.0"}`)
+	}))
+	defer srv.Close()
+	s := &slackChat{b: b, sl: slack.New("test", slack.OptionAPIURL(srv.URL+"/")), users: map[string]bool{"U1": true}}
+	var cb slack.InteractionCallback
+	if err := json.Unmarshal([]byte(`{"user":{"id":"U1"},"container":{"channel_id":"C1","thread_ts":"1.0","message_ts":"2.0"},"actions":[{"action_id":"retry","block_id":"eeeeeeee"}]}`), &cb); err != nil {
+		t.Fatal(err)
+	}
+	s.act(cb)
+	if !strings.Contains(posted, "previous session") {
+		t.Errorf("missing stale control explanation: %q", posted)
 	}
 }
 
