@@ -85,6 +85,7 @@ type thread struct {
 	N                  int    `json:"n"` // the newest record relayed
 	AttachmentPending  bool   `json:"attachment_pending,omitempty"`
 	AttachmentRecovery bool   `json:"attachment_recovery,omitempty"`
+	Request            string `json:"request,omitempty"` // latest genuine chat request; stable through auto-continuation
 }
 
 // chat is what the core needs of a chat app. th is a thread's key.
@@ -134,6 +135,12 @@ type info struct {
 }
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "slack" {
+		if err := runSlackCLI(os.Args[2:], os.Stdout); err != nil {
+			os.Exit(1)
+		}
+		return
+	}
 	try := flag.Bool("console", false, "try this build in the terminal against the harness: stdin lines are messages in one thread, and what the bot would post is printed; no chat tokens needed, and the bot's state is not touched")
 	session := flag.String("session", "", "with -console: show this session in the thread instead of starting one")
 	wait := flag.Duration("wait", 10*time.Minute, "with -console: how long to wait at the end of input for the session to stop working")
@@ -801,6 +808,15 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 	if len(parts) == 0 {
 		return nil
 	}
+	if platform(th) == "slack" && isTS(msgID) && !bridgeMessage(msgID) {
+		b.mu.Lock()
+		if current, ok := b.st.Threads[th]; ok {
+			current.Request = msgID
+			b.st.Threads[th] = current
+			b.save()
+		}
+		b.mu.Unlock()
+	}
 	var body bytes.Buffer
 	ctype := "text/plain"
 	if len(parts) == 1 && parts[0].ctype == ctype {
@@ -1077,11 +1093,24 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		t.calls++
 		t.stepCalls++
 		title, detail := callParts(r.Body)
-		t.tasks = append(t.tasks, task{id: r.ID, title: title, detail: detail, status: "in_progress", attachment: attachmentCall(r.Body)})[max(0, len(t.tasks)+1-maxTasks):]
+		t.tasks = append(t.tasks, task{id: r.ID, title: title, detail: detail, status: "in_progress", attachment: attachmentCall(r.Body), slackAction: slackActionCall(r.Body)})[max(0, len(t.tasks)+1-maxTasks):]
 		t.dirty = true
 	case statefile.Result:
+		b.mu.Lock()
+		request := b.st.Threads[th].Request
+		b.mu.Unlock()
+		receipt := confirmedSlackReceipt(r.Body, id, request)
+		if receipt != nil {
+			t.attachmentExpected = false
+			t.actionReceipt = receipt.Permalink
+			t.actionFailed = false
+			b.deliveryState(th, id, t)
+		}
 		for i := range t.tasks {
 			if t.tasks[i].id == r.For {
+				if t.tasks[i].slackAction && receipt == nil {
+					t.actionFailed = true
+				}
 				t.tasks[i].status = "complete"
 				if (r.Exit != nil && *r.Exit != 0) || (r.Exit == nil && bytes.HasPrefix(r.Body, []byte("error: "))) {
 					t.tasks[i].status = "error"
@@ -1109,9 +1138,11 @@ type turn struct {
 	status             string   // the status message, once posted
 	dirty              bool     // calls the status message does not show yet
 	shown              time.Time
-	attachmentExpected bool  // a run call only printed the delivery directive
-	deliveryRecovery   bool  // one corrective model step has already been requested
-	deliveryErr        error // any progress reply/attachment that failed to send
+	attachmentExpected bool   // a run call only printed the delivery directive
+	deliveryRecovery   bool   // one corrective model step has already been requested
+	deliveryErr        error  // any progress reply/attachment that failed to send
+	actionReceipt      string // confirmed executed Slack action, not an assistant assertion
+	actionFailed       bool   // sender action returned no authoritative receipt
 
 	// Set when the turn is done, for its last status.
 	done    bool
@@ -1125,6 +1156,7 @@ type turn struct {
 type task struct {
 	id, title, detail, status string
 	attachment                bool
+	slackAction               bool
 }
 
 // maxTasks is the most calls a turn keeps, as many as a Slack plan block holds.
@@ -1319,7 +1351,7 @@ func (b *bridge) bind(th, id string, n int) {
 	defer b.mu.Unlock()
 	if t := b.st.Threads[th]; t.Session != id || n > t.N {
 		if t.Session != id {
-			t = thread{Session: id}
+			t = thread{Session: id, Request: t.Request}
 		}
 		t.N = n
 		b.st.Threads[th] = t
