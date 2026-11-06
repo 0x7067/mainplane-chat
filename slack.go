@@ -543,7 +543,7 @@ func (s *slackChat) post(channel, ts, fallback string, blocks ...slack.Block) er
 // title says how the turn went, with the session id, which Slack's title does
 // not show.
 func (s *slackChat) status(th, id string, t *turn) {
-	busy := s.b.busyCount()
+	busy := s.b.busyCount(id)
 	busyTag := ""
 	if busy > 0 {
 		busyTag = " · " + strconv.Itoa(busy) + " other"

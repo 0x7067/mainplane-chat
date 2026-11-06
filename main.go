@@ -67,6 +67,7 @@ type bridge struct {
 	carried   map[string][]string // thread -> messages of continued turns, marked when its next turn ends
 	sentIn    map[string]string   // chat message -> the thread that sent it to a session
 	renames   map[string]*title   // thread -> the title it waits for, while its renamer runs
+	busy      map[string]bool     // session activity, refreshed by watchSessions; status never does I/O
 	st        state
 }
 
@@ -569,19 +570,45 @@ func continued(msg string) string {
 // only sessions made in the last day are.
 func (b *bridge) watchSessions() {
 	checked := map[string]bool{}
+	jobCounts := map[string]struct{ n, count int }{}
 	// Sessions another continues: their thread, if any, has moved on. The list
 	// is newest first, so a continuation is read before the session it continues.
 	moved := map[string]bool{}
 	for ; ; time.Sleep(3 * time.Second) {
 		var infos []struct {
 			ID      string
+			Status  statefile.Status
+			N       int
 			Created time.Time
 			Config  statefile.Conf
 		}
-		if err := b.call("GET", "/sessions?limit=20", "", nil, &infos); err != nil {
+		if err := b.call("GET", "/sessions?limit=100", "", nil, &infos); err != nil {
 			log.Printf("sessions: %v", err)
 			continue
 		}
+		busy := map[string]bool{}
+		present := map[string]bool{}
+		for _, in := range infos {
+			present[in.ID] = true
+			cached, ok := jobCounts[in.ID]
+			if !ok || cached.n != in.N {
+				if count, err := b.countBackgroundJobs(in.ID); err == nil {
+					cached.n, cached.count = in.N, count
+					jobCounts[in.ID] = cached
+				} else {
+					log.Printf("jobs %s: %v", in.ID, err)
+				}
+			}
+			busy[in.ID] = in.Status == statefile.StatusStepping || in.Status == statefile.StatusOpen || cached.count > 0
+		}
+		for id := range jobCounts {
+			if !present[id] {
+				delete(jobCounts, id)
+			}
+		}
+		b.mu.Lock()
+		b.busy = busy
+		b.mu.Unlock()
 		for _, in := range infos {
 			if checked[in.ID] || time.Since(in.Created) > 24*time.Hour {
 				continue
@@ -712,27 +739,27 @@ func (b *bridge) sayInfo(th, id string) error {
 
 // busySession holds info about a running session for !busy.
 type busySession struct {
-	ID            string
-	Name          string
-	Status        string
-	Model         string
-	Started       time.Time
-	FirstVia      string
-	FirstAuthor   string
-	JobCount      int
+	ID             string
+	Name           string
+	Status         string
+	Model          string
+	Started        time.Time
+	FirstVia       string
+	FirstAuthor    string
+	JobCount       int
 	BackgroundJobs int
-	Updated       time.Time
+	Updated        time.Time
 }
 
 // sayBusy lists all sessions that are stepping or have background jobs.
 func (b *bridge) sayBusy(th, id string) error {
 	var infos []struct {
-		ID      string           `json:"id"`
-		Name    string           `json:"name"`
-		Status  string           `json:"status"`
-		Config  statefile.Conf   `json:"config"`
-		Created time.Time        `json:"created"`
-		Updated time.Time        `json:"updated"`
+		ID      string         `json:"id"`
+		Name    string         `json:"name"`
+		Status  string         `json:"status"`
+		Config  statefile.Conf `json:"config"`
+		Created time.Time      `json:"created"`
+		Updated time.Time      `json:"updated"`
 	}
 	if err := b.call("GET", "/sessions?limit=100", "", nil, &infos); err != nil {
 		return fmt.Errorf("could not list sessions: %w", err)
@@ -740,23 +767,29 @@ func (b *bridge) sayBusy(th, id string) error {
 
 	var busy []busySession
 	for _, in := range infos {
-		// Skip sessions that are not currently active or stepping
-		if in.Status != "stepping" && in.Status != "open" && in.Status != "interrupted" {
+		if in.ID == id {
+			continue
+		}
+		background, err := b.countBackgroundJobs(in.ID)
+		if err != nil {
+			return fmt.Errorf("read jobs for %s: %w", in.ID, err)
+		}
+		if in.Status != string(statefile.StatusStepping) && in.Status != string(statefile.StatusOpen) && background == 0 {
 			continue
 		}
 
 		bs := busySession{
-			ID:       in.ID,
-			Name:     in.Name,
-			Status:   in.Status,
-			Model:    in.Config.Model,
-			Started:  in.Created,
-			Updated:  in.Updated,
+			ID:      in.ID,
+			Name:    in.Name,
+			Status:  in.Status,
+			Model:   in.Config.Model,
+			Started: in.Created,
+			Updated: in.Updated,
 		}
 
 		// Count background jobs by checking records
 		bs.JobCount = b.countJobs(in.ID)
-		bs.BackgroundJobs = b.countBackgroundJobs(in.ID)
+		bs.BackgroundJobs = background
 
 		// Get first message via and author
 		first, via, ok := b.firstMessage(in.ID)
@@ -776,7 +809,7 @@ func (b *bridge) sayBusy(th, id string) error {
 	}
 
 	var lines []string
-	lines = append(lines, "**Busy sessions** (" + strconv.Itoa(len(busy)) + "):")
+	lines = append(lines, "**Other busy sessions** ("+strconv.Itoa(len(busy))+"):")
 	lines = append(lines, "")
 
 	for _, bs := range busy {
@@ -818,7 +851,17 @@ func (b *bridge) extractAuthor(via, first string) string {
 	if via == "" {
 		return ""
 	}
-	// via is like "slack:U123" or "discord:123"
+	// via is the connector, not the person. Slack's author is in its body,
+	// after any bridge/session notes.
+	if via == "slack" {
+		for _, line := range strings.Split(first, "\n") {
+			if strings.HasPrefix(line, "[") {
+				if author, _, ok := strings.Cut(line[1:], "]:"); ok && strings.Contains(author, "<@") {
+					return author
+				}
+			}
+		}
+	}
 	if idx := strings.Index(via, ":"); idx >= 0 {
 		return via[:idx]
 	}
@@ -841,14 +884,21 @@ func (b *bridge) countJobs(id string) int {
 }
 
 // countBackgroundJobs counts how many background jobs are running in a session.
-func (b *bridge) countBackgroundJobs(id string) int {
+func (b *bridge) countBackgroundJobs(id string) (int, error) {
 	recs, err := b.records(id, 0, "")
 	if err != nil {
-		return 0
+		return 0, err
 	}
-	count := 0
+	return runningBackgroundJobs(recs), nil
+}
+
+// Match the harness's job lifecycle, not the lifetime count of background
+// run calls: only an acknowledged start with no report/stop is still running.
+func runningBackgroundJobs(recs []statefile.Record) int {
+	background, running, reported := map[string]bool{}, map[string]bool{}, map[string]bool{}
 	for _, r := range recs {
-		if r.Kind == statefile.Call {
+		switch {
+		case r.Kind == statefile.Call:
 			var c struct {
 				Name      string         `json:"name"`
 				Arguments map[string]any `json:"arguments"`
@@ -858,52 +908,30 @@ func (b *bridge) countBackgroundJobs(id string) int {
 			}
 			if c.Name == "run" {
 				if bg, ok := c.Arguments["background"].(bool); ok && bg {
-					count++
+					background[r.ID] = true
 				}
 			}
+		case r.Kind == statefile.Result && background[r.For] && !reported[r.For] && strings.HasPrefix(string(r.Body), "started job "):
+			running[r.For] = true
+		case r.Kind == statefile.Message && r.Via == "job" || r.Kind == statefile.System && r.Source == "job":
+			reported[r.IdempotencyKey] = true
+			delete(running, r.IdempotencyKey)
+		case r.Kind == statefile.Error && r.Via != "" || r.Kind == statefile.System && r.Source == "stop":
+			clear(background)
+			clear(running)
 		}
 	}
-	return count
+	return len(running)
 }
 
-// busyCount returns the number of other sessions that are stepping or have background jobs.
-func (b *bridge) busyCount() int {
-	var infos []struct {
-		ID     string `json:"id"`
-		Status string `json:"status"`
-	}
-	if err := b.call("GET", "/sessions?limit=100", "", nil, &infos); err != nil {
-		return 0
-	}
+// busyCount is a cheap snapshot read: status runs every three seconds per
+// thread and must never make harness calls or reread session histories.
+func (b *bridge) busyCount(current string) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	count := 0
-	for _, in := range infos {
-		if in.Status != "stepping" && in.Status != "open" && in.Status != "interrupted" {
-			continue
-		}
-		// Check for background jobs
-		recs, err := b.records(in.ID, 0, "")
-		if err != nil {
-			continue
-		}
-		hasBg := false
-		for _, r := range recs {
-			if r.Kind == statefile.Call {
-				var c struct {
-					Name      string         `json:"name"`
-					Arguments map[string]any `json:"arguments"`
-				}
-				if json.Unmarshal(r.Body, &c) != nil {
-					continue
-				}
-				if c.Name == "run" {
-					if bg, ok := c.Arguments["background"].(bool); ok && bg {
-						hasBg = true
-						break
-					}
-				}
-			}
-		}
-		if in.Status == "stepping" || hasBg {
+	for id, active := range b.busy {
+		if id != current && active {
 			count++
 		}
 	}

@@ -84,6 +84,7 @@ Type these in a thread. In Discord, `/` and `!` both work. In Slack, use `!`, as
 | `/retry` | step a failed session again |
 | `/stop` | stop the running step |
 | `/info` | show the status, model, workers and context |
+| `/busy` | list other active sessions, their authors and outstanding background jobs |
 | `/delete` | delete the session for good, as `mainplane delete` does |
 
 ## Trying a build
