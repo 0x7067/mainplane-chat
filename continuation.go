@@ -14,6 +14,8 @@ import (
 // result. Reserve space for the actual requests separately from recent work.
 const maxHandoff = 16 << 10
 
+const autoContinueText = "The session before ran out of context. Carry on where it stopped."
+
 const logFormatNote = "The log is NOT JSONL: each record is a JSON header line, exactly header.len bytes of body, then a newline. Do not grep it as one JSON object per line or read the whole log."
 
 const sessionContextPrefix = "(Session context from the chat bridge:"
@@ -62,6 +64,9 @@ func continuationContext(recs []statefile.Record) string {
 			// Carry the requests, not another copy of an entire handoff.
 			if _, rest, ok := strings.Cut(body, "Current requests:\n"); ok {
 				inherited, _, _ = strings.Cut(rest, "\n\nRecent progress")
+			}
+			if _, instruction, ok := strings.Cut(body, "\n\nContinuation instruction:\n"); ok && instruction != autoContinueText {
+				requests = append(requests, handoffExcerpt(instruction, 2000))
 			}
 			continue
 		}

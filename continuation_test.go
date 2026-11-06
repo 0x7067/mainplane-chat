@@ -67,8 +67,8 @@ func TestContinuationContext(t *testing.T) {
 	}
 	// Progress text must not erase the task; the next continuation must not
 	// need to rediscover it by reading raw logs either.
-	next := continuationContext([]statefile.Record{rec(statefile.Message, "slack", continuePrefix+"abcd1234.\n"+got), rec(statefile.Message, "slack", "[pedro <@U1>]: where is it?")})
-	if !strings.Contains(next, "top-level message") || !strings.Contains(next, "where is it?") {
+	next := continuationContext([]statefile.Record{rec(statefile.Message, "slack", continuePrefix+"abcd1234.\n"+got+"\n\nContinuation instruction:\nNew task: make the bicycle red."), rec(statefile.Message, "slack", "[pedro <@U1>]: where is it?")})
+	if !strings.Contains(next, "top-level message") || !strings.Contains(next, "where is it?") || !strings.Contains(next, "make the bicycle red") {
 		t.Errorf("lost requests in second handoff: %s", next)
 	}
 	recs = append(recs, rec(statefile.Result, "", strings.Repeat("é", 100000)+" /tmp/final.png"))

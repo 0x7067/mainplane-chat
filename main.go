@@ -494,7 +494,7 @@ func (b *bridge) continueFull(th, id string) bool {
 	if taken {
 		return true
 	}
-	text := "The session before ran out of context. Carry on where it stopped."
+	text := autoContinueText
 	if recs, err := b.records(id, 0, ""); err == nil {
 		if stalledContinuation(recs) {
 			b.mu.Lock()
