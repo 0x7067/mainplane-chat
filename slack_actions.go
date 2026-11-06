@@ -26,6 +26,10 @@ const slackActionWait = 30 * time.Second
 
 var slackChannelID = regexp.MustCompile(`^[CDG][A-Z0-9]+$`)
 
+// Upload transport errors can contain signed URLs. Neither those nor bot
+// credentials belong in the agent's tool result or its session records.
+var slackErrorSecrets = regexp.MustCompile(`https?://[^\s"<>]+|(?:xox[baprs]-|xapp-|mp_key_)[A-Za-z0-9._-]+`)
+
 type slackAction struct {
 	Action, Text, File, Channel, Thread, Session, Request, Key string
 }
@@ -61,7 +65,7 @@ func slackReceiptPath(key string) (string, error) {
 func runSlackCLI(args []string, out io.Writer) error {
 	finish := func(r slackReceipt, err error) error {
 		if err != nil {
-			r.OK, r.Error = false, err.Error()
+			r.OK, r.Error = false, slackErrorSecrets.ReplaceAllString(err.Error(), "[redacted]")
 		}
 		if encodeErr := json.NewEncoder(out).Encode(r); encodeErr != nil {
 			return encodeErr

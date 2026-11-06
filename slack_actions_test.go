@@ -246,6 +246,14 @@ func TestSlackRequestIdentitySurvivesContinuation(t *testing.T) {
 	}
 }
 
+func TestSenderErrorsDoNotLeakSignedURLsOrCredentials(t *testing.T) {
+	input := `Post "https://files.slack.com/upload/v1/private-signature?secret=abc": timeout xoxb-test-token`
+	got := slackErrorSecrets.ReplaceAllString(input, "[redacted]")
+	if strings.Contains(got, "private-signature") || strings.Contains(got, "xoxb-") || !strings.Contains(got, "timeout") {
+		t.Fatalf("unsafe error: %s", got)
+	}
+}
+
 func TestUnconfirmedNativeActionCannotClaimSent(t *testing.T) {
 	b, c := testCore(t)
 	tr := &turn{}
