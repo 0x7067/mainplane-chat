@@ -39,6 +39,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/mainplane-ai/mainplane/pkg/catalog"
+	"github.com/mainplane-ai/mainplane/pkg/provider"
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
 )
 
@@ -119,6 +120,7 @@ type file struct {
 	name, ctype string
 	size        int
 	fetch       func() ([]byte, error)
+	topLevel    bool // Slack: share in the channel instead of this thread
 }
 
 type info struct {
@@ -219,6 +221,15 @@ func (b *bridge) command(th, id, msgID, text string) bool {
 	case "stop":
 		err = b.call("POST", "/sessions/"+id+"/stop?via="+platform(th), "", nil, nil)
 	case "retry":
+		// An explicit Retry after downtime must recover a known full
+		// session too, rather than growing the same rejected history again.
+		if recs, readErr := b.records(id, 0, ""); readErr == nil && len(recs) > 0 {
+			r := recs[len(recs)-1]
+			if r.Kind == statefile.Error && r.Via == "" && b.endedFull(id, string(r.Body)) {
+				b.continueFull(th, id)
+				break
+			}
+		}
 		if err = b.call("POST", "/sessions/"+id+"/retry?via="+platform(th), "", nil, nil); err == nil {
 			b.resume(th, id)
 		}
@@ -310,24 +321,75 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 			return "", err
 		}
 	}
+	recs, err := b.records(old, 0, "")
+	if err != nil {
+		return "", fmt.Errorf("read continuation context: %w", err)
+	}
+	// Upgrade old pointer-only continuations too. Read their predecessor's
+	// snapshot, not messages sent to it after this conversation had moved on.
+	contextRecords, ancestor := recs, recs
+	visited := map[string]bool{old: true}
+	for range 3 {
+		var first *statefile.Record
+		for i := range ancestor {
+			if ancestor[i].Kind == statefile.Message {
+				first = &ancestor[i]
+				break
+			}
+		}
+		if first == nil || strings.Contains(string(first.Body), "Current requests:\n") {
+			break
+		}
+		previous := continued(string(first.Body))
+		if previous == "" || visited[previous] {
+			break
+		}
+		visited[previous] = true
+		previousRecords, readErr := b.records(previous, 0, "")
+		if readErr != nil {
+			log.Printf("older continuation %s: %v", previous, readErr)
+			break
+		}
+		ancestor = slices.DeleteFunc(previousRecords, func(r statefile.Record) bool { return r.Time.After(first.Time) })
+		contextRecords = append(slices.Clone(ancestor), contextRecords...)
+	}
+	m := continuePrefix + old + ". Continue the task using the handoff below; retrieve older context only if a specific fact is missing."
+	m += "\n\n" + continuationContext(contextRecords)
+	if platform(th) == "slack" {
+		channel, ts := threadParts(th)
+		m += "\n\nSlack conversation: channel " + channel + ", thread " + ts + ". " + slackDeliveryNote
+	}
+	if paths := b.logPaths(old, cur.Config); len(paths) > 0 {
+		m += "\nOlder records (only if needed): " + strings.Join(paths, ", ") + ". " + logFormatNote
+	}
+	if text != "" {
+		m += "\n\nContinuation instruction:\n" + text
+	}
 	id, err := b.create(conf, platform(th))
 	if err != nil {
 		return "", err
 	}
-	b.bind(th, id, 0)
 	b.say(th, msg{Note: "continuing in session " + id + " on " + conf.Model})
-	for _, o := range b.threadsShowing(old) {
+	others := b.threadsShowing(old)
+	if err := b.post(th, id, msgID, "", m, nil); err != nil {
+		// A lost response is not proof that the send failed. Delete only a
+		// session confirmed empty; never destroy potentially accepted work.
+		if pending, readErr := b.records(id, 0, ""); readErr == nil && !slices.ContainsFunc(pending, func(r statefile.Record) bool { return r.Kind == statefile.Message }) {
+			if cleanup := b.call("DELETE", "/sessions/"+id, "", nil, nil); cleanup != nil {
+				log.Printf("remove empty continuation %s: %v", id, cleanup)
+			}
+		} else {
+			b.say(th, msg{Note: "Could not confirm delivery to session " + id + "; preserved it for inspection. The thread still follows " + old + "."})
+		}
+		return "", err
+	}
+	for _, o := range others {
+		if o == th {
+			continue
+		}
 		b.follow(o, id, 0)
 		b.say(o, msg{Note: "continued in session " + id})
 	}
-	m := continuePrefix + old + ". Retrieve key context from it as you go."
-	if paths := b.logPaths(old, cur.Config); len(paths) > 0 {
-		m += " Its log: " + strings.Join(paths, ", ") + "."
-	}
-	if text != "" {
-		m += "\n" + text
-	}
-	b.post(th, id, msgID, "", m, nil)
 	return id, nil
 }
 
@@ -390,11 +452,28 @@ func (b *bridge) endedFull(id, body string) bool {
 	if contextFull(body) {
 		return true
 	}
-	if !providerFull(body) {
+	lengthStop := strings.HasPrefix(body, `The last step ended with stop "length"`) || strings.HasPrefix(body, `The last step ended with stop "max_tokens"`)
+	if !providerFull(body) && !lengthStop {
 		return false
 	}
 	i, err := b.info(id)
-	return err == nil && historyOverflow(body, i.ContextUsed)
+	if err != nil {
+		return false
+	}
+	// ContextUsed counts only the prompt. A long thinking/reply block from
+	// that step is now history too, even when no later step succeeded.
+	recs, err := b.records(id, 0, "")
+	if err != nil {
+		return false
+	}
+	used := i.ContextUsed
+	if step := statefile.LastStep(recs); step != nil && step.Usage != nil {
+		used = step.Usage.Prompt() + step.Usage.Output
+	}
+	if lengthStop {
+		return i.Config.ContextLimit > 0 && used >= i.Config.ContextLimit
+	}
+	return historyOverflow(body, used)
 }
 
 // fullKey starts the idempotency key of the first message of a session the
@@ -402,12 +481,12 @@ func (b *bridge) endedFull(id, body string) bool {
 const fullKey = "context-full-"
 
 // continueFull is /continue, run by the bot when the thread's session ends
-// at its context limit (error record n), as Mainplane intends a full session
-// to go on. The new session gets the last message the full one did not
-// answer, so it answers what was just asked. Of the threads that show the
+// at its context limit, as Mainplane intends a full session to go on. Its
+// bounded handoff retains the task even after intermediate progress text.
+// Of the threads that show the
 // session, only the first to get here continues it; the others follow. It
 // reports whether the session goes on: continued here, or by another thread.
-func (b *bridge) continueFull(th, id string, n int) bool {
+func (b *bridge) continueFull(th, id string) bool {
 	b.mu.Lock()
 	taken := b.full[id]
 	b.full[id] = true
@@ -415,13 +494,20 @@ func (b *bridge) continueFull(th, id string, n int) bool {
 	if taken {
 		return true
 	}
-	text := "The session before ran out of context. Carry on where it stopped."
-	if recs, err := b.records(id, max(0, n-20), ""); err == nil {
-		if m := lastUnanswered(recs); m != "" {
-			text += "\nThe last message, which it did not answer:\n" + m
+	text := autoContinueText
+	if recs, err := b.records(id, 0, ""); err == nil {
+		if stalledContinuation(recs) {
+			b.mu.Lock()
+			delete(b.full, id)
+			b.mu.Unlock()
+			b.say(th, msg{Text: "Automatic continuation stopped: the new session filled before making progress. Use !model to choose a larger context, or !continue with a shorter task."})
+			return false
 		}
 	}
 	if _, err := b.continueIn(th, id, fullKey+id, "", text); err != nil {
+		b.mu.Lock()
+		delete(b.full, id) // a transient failure must not poison later recovery
+		b.mu.Unlock()
 		b.say(th, msg{Text: "automatic /continue failed: " + err.Error()})
 		return false
 	}
@@ -701,13 +787,21 @@ func (b *bridge) create(conf statefile.Conf, via string) (string, error) {
 // session. Each part is a record: the text, then each image. prefix (who wrote
 // it, from a chat that says) goes before the text only when the message has
 // something to send, so a message whose files were all skipped sends nothing.
-func (b *bridge) post(th, id, msgID, prefix, text string, files []file) {
+func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
+	note := sessionContext(th, id)
+	if strings.HasPrefix(text, continuePrefix) {
+		// The first line must still identify the predecessor for the watcher.
+		first, rest, _ := strings.Cut(text, "\n")
+		text = first + "\n\n" + note + "\n" + rest
+	} else {
+		prefix = note + "\n\n" + prefix
+	}
 	parts, skipped := b.parts(id, prefix, text, files)
 	if len(skipped) > 0 {
 		b.say(th, msg{Note: "not sent: " + strings.Join(skipped, ", ")})
 	}
 	if len(parts) == 0 {
-		return
+		return nil
 	}
 	var body bytes.Buffer
 	ctype := "text/plain"
@@ -730,11 +824,30 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) {
 	b.mu.Unlock()
 	var out struct{ N int }
 	if err := b.do(req, &out); err != nil {
+		// The harness may have accepted the idempotent message before the
+		// connection/response failed. Reattach instead of creating duplicates.
+		if recs, lookupErr := b.records(id, 0, ""); lookupErr == nil {
+			first, accepted := 0, 0
+			for _, r := range recs {
+				if r.Kind == statefile.Message && msgID != "" && r.IdempotencyKey == msgID {
+					if first == 0 {
+						first = r.N
+					}
+					accepted++
+				}
+			}
+			if accepted >= len(parts) {
+				b.chat(th).react(th, msgID, seen)
+				b.follow(th, id, first-1)
+				return nil
+			}
+		}
 		b.say(th, msg{Text: "send failed: " + err.Error()})
-		return
+		return err
 	}
 	b.chat(th).react(th, msgID, seen)
 	b.follow(th, id, out.N-len(parts)) // from the message itself, the reply's target
+	return nil
 }
 
 type part struct {
@@ -870,7 +983,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		if t.stepCalls > 0 {
 			b.reply(th, strings.Join(t.text, "\n\n"), "", false)
 			t.text, t.stepCalls = nil, 0
-		} else {
+		} else if provider.Normal(r.Header) {
 			b.finish(th, id, t, "")
 		}
 	case statefile.Message:
@@ -903,6 +1016,16 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 			b.rename(th, id, string(r.Body))
 		}
 	case statefile.Error:
+		if !b.shows(th, id) {
+			// An old request can fail after a model switch. Do not offer a
+			// Retry for it, or change the new session's state or reactions.
+			if t.status != "" {
+				t.done, t.outcome, t.took = true, "continued", time.Since(t.start).Round(time.Second)
+				b.chat(th).status(th, id, t)
+			}
+			*t = turn{}
+			return
+		}
 		full := r.Via == "" && fresh(r.Time, time.Now()) && b.shows(th, id) && b.endedFull(id, string(r.Body))
 		text := "⚠️ " + string(r.Body)
 		outcome := "failed"
@@ -915,10 +1038,13 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 				b.reply(th, strings.Join(t.text, "\n\n"), t.key, time.Since(t.start) > 2*time.Minute)
 				t.text = nil
 			}
+			// Carry reactions before starting the next follower: a fast new
+			// turn can otherwise finish before these messages are carried.
+			b.finish(th, id, t, "continued")
 			b.say(th, msg{Text: text, Note: "the context is full: continuing in a new session"})
 			b.advance(th, id, r.N)
-			if b.continueFull(th, id, r.N) { // not a failure: the turn goes on in a new session
-				outcome = "continued"
+			if b.continueFull(th, id) { // not a failure: the turn goes on in a new session
+				return
 			}
 		}
 		b.finish(th, id, t, outcome)
@@ -1036,8 +1162,29 @@ func reaction(outcome string) string {
 func (b *bridge) reply(th, text, replyTo string, notify bool) {
 	var lines, notes []string
 	var files []file
+	fence := ""
 	for _, l := range strings.Split(text, "\n") {
+		trimmed := strings.TrimSpace(l)
+		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
+			marker := trimmed[:3]
+			if fence == "" {
+				fence = marker
+			} else if fence == marker {
+				fence = ""
+			}
+			lines = append(lines, l)
+			continue
+		}
+		if fence != "" {
+			lines = append(lines, l)
+			continue
+		}
 		path, ok := strings.CutPrefix(strings.TrimSpace(l), "attach: ")
+		topLevel := false
+		if !ok && platform(th) == "slack" {
+			path, ok = strings.CutPrefix(strings.TrimSpace(l), "attach-channel: ")
+			topLevel = ok
+		}
 		if !ok {
 			lines = append(lines, l)
 			continue
@@ -1051,7 +1198,7 @@ func (b *bridge) reply(th, text, replyTo string, notify bool) {
 			notes = append(notes, "could not attach: "+err.Error())
 			continue
 		}
-		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }})
+		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }, topLevel: topLevel})
 	}
 	text = strings.TrimSpace(strings.Join(lines, "\n"))
 	if text == "" && len(notes) == 0 && len(files) == 0 {

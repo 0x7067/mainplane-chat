@@ -128,7 +128,13 @@ func runConsole(b *bridge, session string, wait time.Duration) {
 		}
 		if i, err := b.info(id); err != nil || i.Status != "stepping" && i.Status != "open" {
 			time.Sleep(3 * time.Second) // the follower relays the end of the turn
-			return
+			// A full/failed session may have moved to its continuation while
+			// its follower relayed the error. Wait for that turn, not the old id.
+			if b.sessionFor(consoleThread) == id {
+				if current, err := b.info(id); err != nil || current.Status != "stepping" && current.Status != "open" {
+					return
+				}
+			}
 		}
 		if time.Now().After(end) {
 			c.print(fmt.Sprintf("console: session %s still working after %s", id, wait))
