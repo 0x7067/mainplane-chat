@@ -25,6 +25,14 @@ const logFormatNote = "The log is NOT JSONL: each record is a JSON header line, 
 
 const sessionContextPrefix = "(Session context from the chat bridge:"
 
+// The headings of a handoff, written where the message is built and read
+// back where the next continuation parses it: one wording, one place.
+const (
+	requestsHeading    = "Current requests:\n"
+	progressHeading    = "\n\nRecent progress"
+	instructionHeading = "\n\nContinuation instruction:\n"
+)
+
 // The bridge owns this mapping. Do not make the model infer its own identity
 // by guessing from whichever session mainplane sessions happens to list first.
 func sessionContext(th, id string) string {
@@ -68,10 +76,10 @@ func continuationContext(recs []statefile.Record) string {
 		}
 		if strings.HasPrefix(body, continuePrefix) {
 			// Carry the requests, not another copy of an entire handoff.
-			if _, rest, ok := strings.Cut(body, "Current requests:\n"); ok {
-				inherited, _, _ = strings.Cut(rest, "\n\nRecent progress")
+			if _, rest, ok := strings.Cut(body, requestsHeading); ok {
+				inherited, _, _ = strings.Cut(rest, progressHeading)
 			}
-			if _, instruction, ok := strings.Cut(body, "\n\nContinuation instruction:\n"); ok && instruction != autoContinueText {
+			if _, instruction, ok := strings.Cut(body, instructionHeading); ok && instruction != autoContinueText {
 				requests = append(requests, handoffExcerpt(instruction, 2000))
 			}
 			continue
@@ -127,7 +135,7 @@ func continuationContext(recs []statefile.Record) string {
 		budget -= len(s) + 2
 	}
 	slices.Reverse(recent)
-	out := "Current requests:\n" + strings.Join(kept, "\n\n") + "\n\nRecent progress (excerpts, not proof that an assistant's claims succeeded):\n" + strings.Join(recent, "\n\n")
+	out := requestsHeading + strings.Join(kept, "\n\n") + progressHeading + " (excerpts, not proof that an assistant's claims succeeded):\n" + strings.Join(recent, "\n\n")
 	if framing != "" {
 		out = handoffExcerpt(framing, 1500) + "\n\n" + out
 	}
@@ -310,7 +318,7 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 		m += "\nOlder records (only if needed): " + strings.Join(paths, ", ") + ". " + logFormatNote
 	}
 	if text != "" {
-		m += "\n\nContinuation instruction:\n" + text
+		m += instructionHeading + text
 	}
 	id, err := b.create(conf, platform(th))
 	if err != nil {

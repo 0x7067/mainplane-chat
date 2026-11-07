@@ -22,6 +22,18 @@ const deliveryKey = "attachment-help-"
 
 const deliveryCorrection = "Delivery correction from the chat bridge: the tool only printed an attachment instruction. No file was uploaded. Execute mainplane-chat slack post --file /absolute/path via run on the bridge worker for the user's requested TOP-LEVEL CHANNEL POST, or mainplane-chat slack reply --file /absolute/path if they requested a thread reply. MAINPLANE_SESSION selects this conversation. Read the returned JSON receipt; only say sent if ok:true and give its permalink. Do not echo commands, print attach: lines, or send input to Mainplane sessions."
 
+// deliveryCorrectionAttach is the same correction where the chat takes the
+// final-text attach: line, with no executed sender to run.
+const deliveryCorrectionAttach = "Delivery correction from the chat bridge: the tool only printed an attachment instruction. No file was uploaded. Deliver the file by putting a standalone line attach: /absolute/path in your final reply text, outside code blocks; the bridge reads that path on its machine and uploads the file in place of the line. Do not print attach: inside tools, echo commands, or claim a file was sent without that line."
+
+// deliveryCorrectionFor picks the correction for the thread's chat.
+func deliveryCorrectionFor(th string) string {
+	if platform(th) == "slack" {
+		return deliveryCorrection
+	}
+	return deliveryCorrectionAttach
+}
+
 func bridgeMessage(key string) bool {
 	return strings.HasPrefix(key, fullKey) || strings.HasPrefix(key, deliveryKey)
 }
@@ -148,7 +160,7 @@ func (b *bridge) finishStep(th, id string, t *turn, r statefile.Record) {
 	t.deliveryRecovery = true
 	b.finish(th, id, t, "continued")
 	b.say(th, msg{Note: "No file was uploaded: the agent only printed an attachment line in a tool. Correcting delivery."})
-	if err := b.post(th, id, deliveryKey+id+"-"+r.ID, "", deliveryCorrection, nil); err != nil {
+	if err := b.post(th, id, deliveryKey+id+"-"+r.ID, "", deliveryCorrectionFor(th), nil); err != nil {
 		b.finish(th, id, t, "failed")
 	}
 }
