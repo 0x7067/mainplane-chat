@@ -23,13 +23,12 @@ var errNoModel = errors.New("no model to start from: make one session with `main
 // the harness serves; the catalog only adds names and preset configs.
 type choices struct {
 	cat       catalog.Catalog
-	providers []string         // the providers the harness serves
-	recent    []statefile.Conf // the newest sessions' configs, newest first
+	providers []string // the providers the harness serves
 	ids       []string
 }
 
 func newChoices(cat catalog.Catalog, providers []string, recent []statefile.Conf) choices {
-	c := choices{cat: cat, providers: providers, recent: recent}
+	c := choices{cat: cat, providers: providers}
 	for _, id := range cat.Groups[group] {
 		if c.serves(cat.Presets[id].Provider + "/") {
 			c.ids = append(c.ids, id)

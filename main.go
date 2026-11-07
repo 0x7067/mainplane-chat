@@ -527,23 +527,6 @@ func (b *bridge) continueFull(th, id string) bool {
 	return true
 }
 
-// lastUnanswered is the newest text message, from a person or a connector,
-// with no agent reply after it, or "". A retry, a job's report and a
-// continuation's own first message do not count.
-func lastUnanswered(recs []statefile.Record) string {
-	last := ""
-	for _, r := range recs {
-		switch {
-		case r.Kind == statefile.Text:
-			last = ""
-		case r.Kind == statefile.Message && strings.HasPrefix(r.Type, "text/plain") &&
-			r.Via != "retry" && r.Via != "job" && !strings.HasPrefix(string(r.Body), continuePrefix):
-			last = string(r.Body)
-		}
-	}
-	return last
-}
-
 // continuePrefix starts the first message of a session that continues
 // another, from the terminal app's /model and /continue and from this bot's.
 const continuePrefix = "You are continuing session "
@@ -744,11 +727,9 @@ type busySession struct {
 	Status         string
 	Model          string
 	Started        time.Time
-	FirstVia       string
 	FirstAuthor    string
 	JobCount       int
 	BackgroundJobs int
-	Updated        time.Time
 }
 
 // sayBusy lists all sessions that are stepping or have background jobs.
@@ -784,19 +765,13 @@ func (b *bridge) sayBusy(th, id string) error {
 			Status:  in.Status,
 			Model:   in.Config.Model,
 			Started: in.Created,
-			Updated: in.Updated,
 		}
 
 		// Count background jobs by checking records
 		bs.JobCount = b.countJobs(in.ID)
 		bs.BackgroundJobs = background
 
-		// Get first message via and author
-		first, via, ok := b.firstMessage(in.ID)
-		if ok {
-			bs.FirstVia = via
-			// Extract author from via (e.g., "slack:U123" -> "slack")
-			// or from the message body if it has a prefix
+		if first, via, ok := b.firstMessage(in.ID); ok {
 			bs.FirstAuthor = b.extractAuthor(via, first)
 		}
 
