@@ -106,7 +106,7 @@ func TestEndedFullIncludesGeneratedTokens(t *testing.T) {
 					body, _ := statefile.Encode(statefile.Record{Header: statefile.Header{Kind: statefile.Step, Usage: &statefile.Usage{Input: tc.prompt, Output: tc.output}}})
 					w.Write(body)
 				} else {
-					json.NewEncoder(w).Encode(info{ContextUsed: tc.prompt, Config: statefile.Conf{ContextLimit: 65536}})
+					json.NewEncoder(w).Encode(sessionInfo{ContextUsed: tc.prompt, Config: statefile.Conf{ContextLimit: 65536}})
 				}
 			}))
 			defer srv.Close()
@@ -194,7 +194,7 @@ func TestContinuationTransaction(t *testing.T) {
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
 				case r.Method == "GET" && r.URL.Path == "/sessions/abcd1234":
-					json.NewEncoder(w).Encode(info{ID: "abcd1234", N: 11, ContextUsed: 29116, Config: statefile.Conf{Model: "local/model", ContextLimit: 65536}})
+					json.NewEncoder(w).Encode(sessionInfo{ID: "abcd1234", N: 11, ContextUsed: 29116, Config: statefile.Conf{Model: "local/model", ContextLimit: 65536}})
 				case r.Method == "GET" && r.URL.Path == "/sessions/eeeeeeee/records":
 					// The failed-send case is confirmed empty before cleanup.
 				case r.Method == "GET" && r.URL.Path == "/sessions/cccccccc/records":
@@ -306,7 +306,7 @@ func TestPartialMultipartSendIsNotComplete(t *testing.T) {
 			return
 		}
 		if !strings.HasSuffix(r.URL.Path, "/records") {
-			json.NewEncoder(w).Encode(info{Config: statefile.Conf{Input: []string{"image/png"}}})
+			json.NewEncoder(w).Encode(sessionInfo{Config: statefile.Conf{Input: []string{"image/png"}}})
 			return
 		}
 		// The text was accepted, but the image was not.

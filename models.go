@@ -88,7 +88,7 @@ func (c choices) startConf(base *statefile.Conf) (statefile.Conf, error) {
 // (newest first) that a thread shows, so that sessions made elsewhere, such
 // as test runs on another model, do not move the chats; else, when no thread
 // shows a recent one, the newest. Nil when there are no sessions.
-func startBase(recent []info, shown []string) *statefile.Conf {
+func startBase(recent []sessionInfo, shown []string) *statefile.Conf {
 	for _, s := range recent {
 		if slices.Contains(shown, s.ID) {
 			return &s.Config

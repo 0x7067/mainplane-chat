@@ -58,7 +58,7 @@ func TestStartConf(t *testing.T) {
 func TestStartBase(t *testing.T) {
 	test := statefile.Conf{Model: "k3q1/lfm3-1.7b"}
 	chat := statefile.Conf{Model: "m4/qwen3.6-35b-a3b"}
-	recent := []info{{ID: "t1", Config: test}, {ID: "c1", Config: chat}, {ID: "c0", Config: test}}
+	recent := []sessionInfo{{ID: "t1", Config: test}, {ID: "c1", Config: chat}, {ID: "c0", Config: test}}
 	for name, c := range map[string]struct {
 		shown []string
 		want  *statefile.Conf
