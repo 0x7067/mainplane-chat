@@ -46,13 +46,13 @@ func TestBusyCountIsLocalAndExcludesSelf(t *testing.T) {
 	}
 }
 
-func TestBusyAuthorIsPersonNotConnector(t *testing.T) {
+func TestSlackAuthorIsThePersonNotTheConnector(t *testing.T) {
 	for _, first := range []string{"[alice <@U01>]: hi", "(Session context note)\n\n(Note from the Slack bridge)\n\n[alice <@U01>]: hi"} {
-		if got := authorName("slack", first); got != "alice <@U01>" {
+		if got := slackAuthor(first); got != "alice <@U01>" {
 			t.Errorf("author=%q", got)
 		}
 	}
-	if got := authorName("cli", "hi"); got != "cli" {
-		t.Errorf("connector fallback=%q", got)
+	if got := slackAuthor("no framing here"); got != "" {
+		t.Errorf("unframed=%q", got)
 	}
 }

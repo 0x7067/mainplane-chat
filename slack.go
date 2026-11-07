@@ -797,6 +797,18 @@ func frame(bot, where, author, user string) string {
 		"> notifies that person.)\n\n" + line
 }
 
+// slackAuthor is the person frame's prefix names in a message body, or "".
+func slackAuthor(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "[") {
+			if author, _, ok := strings.Cut(line[1:], "]:"); ok && strings.Contains(author, "<@") {
+				return author
+			}
+		}
+	}
+	return ""
+}
+
 const slackDeliveryNote = "For Slack sending, execute mainplane-chat slack post --text 'message' and/or --file /absolute/path via run on the bridge worker. post always creates a NEW TOP-LEVEL CHANNEL MESSAGE. To send inside this thread, use mainplane-chat slack reply instead. MAINPLANE_SESSION automatically selects this conversation; do not guess a channel or session id. The installed sender handles credentials and returns JSON with ok:true and the actual Slack message permalink. Only report delivery after that confirmed receipt. Do not merely echo the command, print attach: lines, read image bytes, or use mainplane message. Files must exist on the bridge worker; copy other workers' files there first. Normal final text still replies in this thread."
 
 // fullMember is a person with a regular account in the given workspace: not a

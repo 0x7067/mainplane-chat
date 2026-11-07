@@ -145,7 +145,7 @@ func (d *discord) handle(m *discordgo.Message) {
 			label = m.Attachments[0].Filename // a message with only files
 		}
 		open := func(id string) (string, error) {
-			th, err := d.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(label, 80), AutoArchiveDuration: 10080})
+			th, err := d.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: threadTitle(id, label), AutoArchiveDuration: 10080})
 			if err != nil {
 				return "", err
 			}
@@ -197,7 +197,7 @@ func (d *discord) mirror(id, from, model, first string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	th, err := d.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(first, 80), AutoArchiveDuration: 10080})
+	th, err := d.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: threadTitle(id, first), AutoArchiveDuration: 10080})
 	if err != nil {
 		return "", err
 	}

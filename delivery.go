@@ -18,6 +18,19 @@ func bridgeMessage(key string) bool {
 	return strings.HasPrefix(key, fullKey) || strings.HasPrefix(key, deliveryKey)
 }
 
+// attachment is the directive a line is, if any: the file to send and whether
+// it goes to the channel's top level rather than the thread. A directive
+// inside a code fence is an example, not a request.
+func attachment(line string) (path string, topLevel bool, ok bool) {
+	for _, prefix := range []string{"attach: ", "attach-channel: "} {
+		if p, is := strings.CutPrefix(line, prefix); is {
+			p = strings.TrimSpace(p)
+			return p, prefix == "attach-channel: ", p != ""
+		}
+	}
+	return "", false, false
+}
+
 func hasAttachment(text string) bool {
 	fence := ""
 	for _, line := range strings.Split(text, "\n") {
@@ -33,10 +46,8 @@ func hasAttachment(text string) bool {
 		if fence != "" {
 			continue
 		}
-		for _, prefix := range []string{"attach: ", "attach-channel: "} {
-			if path, ok := strings.CutPrefix(line, prefix); ok && strings.TrimSpace(path) != "" {
-				return true
-			}
+		if _, _, ok := attachment(line); ok {
+			return true
 		}
 	}
 	return false

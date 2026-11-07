@@ -732,21 +732,6 @@ func (b *bridge) busyNow(id string) bool {
 	return b.busy[id]
 }
 
-// authorName is who a session belongs to: with Slack, the person the
-// bridge's framing names; otherwise the connector that started it.
-func authorName(via, first string) string {
-	if via == "slack" {
-		for _, line := range strings.Split(first, "\n") {
-			if strings.HasPrefix(line, "[") {
-				if author, _, ok := strings.Cut(line[1:], "]:"); ok && strings.Contains(author, "<@") {
-					return author
-				}
-			}
-		}
-	}
-	return via
-}
-
 // sayBusy is !busy: the other sessions that are working, who started them
 // and what they are running on.
 func (b *bridge) sayBusy(th, id string) error {
@@ -772,7 +757,10 @@ func (b *bridge) sayBusy(th, id string) error {
 		}
 		var author string
 		if body, via, ok := firstMessage(recs); ok {
-			author = authorName(via, body)
+			author = via
+			if via == "slack" {
+				author = slackAuthor(body)
+			}
 		}
 		var parts []string
 		parts = append(parts, "session `"+in.ID+"`")
@@ -1223,7 +1211,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		case full:
 			// What the full session wrote goes out first, above the notice.
 			if len(t.text) > 0 {
-				b.reply(th, strings.Join(t.text, "\n\n"), t.key, time.Since(t.start) > 2*time.Minute)
+				b.reply(th, strings.Join(t.text, "\n\n"), t.key, time.Since(t.start) > notifyAfter)
 				t.text = nil
 			}
 			// Carry reactions before starting the next follower: a fast new
@@ -1327,7 +1315,7 @@ const maxTasks = 50
 func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	text, key, asked := strings.Join(t.text, "\n\n"), t.key, t.asked
 	if text != "" {
-		if err := b.reply(th, text, key, time.Since(t.start) > 2*time.Minute); err != nil && outcome == "" {
+		if err := b.reply(th, text, key, time.Since(t.start) > notifyAfter); err != nil && outcome == "" {
 			outcome = "failed"
 		}
 	}
@@ -1380,6 +1368,10 @@ func reaction(outcome string) string {
 	}
 }
 
+// notifyAfter is how long a turn runs before its reply notifies the author
+// of the message it answers.
+const notifyAfter = 2 * time.Minute
+
 // reply posts the agent's text. A line "attach: /path" sends that file from
 // this machine with it, in place of the line.
 func (b *bridge) reply(th, text, replyTo string, notify bool) error {
@@ -1403,17 +1395,14 @@ func (b *bridge) reply(th, text, replyTo string, notify bool) error {
 			lines = append(lines, l)
 			continue
 		}
-		path, ok := strings.CutPrefix(strings.TrimSpace(l), "attach: ")
-		topLevel := false
-		if !ok && platform(th) == "slack" {
-			path, ok = strings.CutPrefix(strings.TrimSpace(l), "attach-channel: ")
-			topLevel = ok
+		path, topLevel, ok := attachment(trimmed)
+		if ok && topLevel && platform(th) != "slack" {
+			ok = false // attach-channel is Slack's
 		}
 		if !ok {
 			lines = append(lines, l)
 			continue
 		}
-		path = strings.TrimSpace(path)
 		data, err := os.ReadFile(path)
 		if err == nil && len(data) > maxAttach {
 			err = fmt.Errorf("%s is over %d MiB", path, maxAttach>>20)
