@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,26 @@ func TestAttachmentIntentNotArbitraryToolOutput(t *testing.T) {
 		if got := attachmentCall([]byte(body)); got != want {
 			t.Errorf("intent %s = %v", body, got)
 		}
+	}
+}
+
+func TestEvictedCallStillCountsAsAttachmentIntent(t *testing.T) {
+	b, _ := testCore(t)
+	tr := &turn{start: time.Now()}
+	for i := 0; i <= maxTasks; i++ {
+		code := "cat /tmp/x"
+		if i == 0 {
+			code = "cat <<'EOF'\nattach: /tmp/image.png\nEOF"
+		}
+		body, _ := json.Marshal(map[string]any{"name": "run", "arguments": map[string]any{"code": code}})
+		b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Call, ID: fmt.Sprintf("c%02d", i)}, Body: body})
+	}
+	if len(tr.tasks) != maxTasks || tr.tasks[0].id != "c01" {
+		t.Fatalf("the first call was not evicted from the display list: %d tasks", len(tr.tasks))
+	}
+	b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Result, For: "c00"}, Body: []byte("attach: /tmp/image.png")})
+	if !tr.attachmentExpected {
+		t.Fatal("an evicted call's result lost the attachment intent")
 	}
 }
 

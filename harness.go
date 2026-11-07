@@ -16,7 +16,7 @@ import (
 )
 
 // sessionInfo is a session as the harness describes it. The list leaves
-// Name, Created, Updated and ContextUsed zero.
+// Name, Created and ContextUsed zero.
 type sessionInfo struct {
 	ID          string           `json:"id"`
 	Name        string           `json:"name"`
@@ -25,7 +25,6 @@ type sessionInfo struct {
 	N           int              `json:"n"`
 	ContextUsed int              `json:"context_used"`
 	Created     time.Time        `json:"created"`
-	Updated     time.Time        `json:"updated"`
 }
 
 // logPaths are where the harness copied a session's records when it

@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"slices"
 	"strings"
 	"time"
@@ -194,7 +192,16 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		t.calls++
 		t.stepCalls++
 		title, detail := callParts(r.Body)
-		t.tasks = append(t.tasks, task{id: r.ID, title: title, detail: detail, status: "in_progress", attachment: attachmentCall(r.Body), slackAction: slackActionCall(r.Body)})[max(0, len(t.tasks)+1-maxTasks):]
+		t.tasks = append(t.tasks, task{id: r.ID, title: title, detail: detail, status: "in_progress"})[max(0, len(t.tasks)+1-maxTasks):]
+		if t.attaching == nil {
+			t.attaching, t.sending = map[string]bool{}, map[string]bool{}
+		}
+		if attachmentCall(r.Body) {
+			t.attaching[r.ID] = true
+		}
+		if slackActionCall(r.Body) {
+			t.sending[r.ID] = true
+		}
 		t.dirty = true
 	case statefile.Result:
 		b.mu.Lock()
@@ -209,20 +216,24 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		}
 		for i := range t.tasks {
 			if t.tasks[i].id == r.For {
-				if t.tasks[i].slackAction && receipt == nil {
-					t.actionFailed = true
-				}
 				t.tasks[i].status = "complete"
 				if (r.Exit != nil && *r.Exit != 0) || (r.Exit == nil && bytes.HasPrefix(r.Body, []byte("error: "))) {
 					t.tasks[i].status = "error"
 				}
-				if t.tasks[i].attachment && t.tasks[i].status == "complete" && hasAttachment(string(r.Body)) {
-					t.attachmentExpected = true
-					b.deliveryState(th, id, t)
-				}
 				t.dirty = true
 			}
 		}
+		// Delivery facts follow the call itself, not the display list: a
+		// call the list no longer shows still counts.
+		if t.sending[r.For] && receipt == nil {
+			t.actionFailed = true
+		}
+		if ok := (r.Exit != nil && *r.Exit == 0) || (r.Exit == nil && !bytes.HasPrefix(r.Body, []byte("error: "))); ok && t.attaching[r.For] && hasAttachment(string(r.Body)) {
+			t.attachmentExpected = true
+			b.deliveryState(th, id, t)
+		}
+		delete(t.sending, r.For)
+		delete(t.attaching, r.For)
 	}
 }
 
@@ -239,11 +250,13 @@ type turn struct {
 	status             string   // the status message, once posted
 	dirty              bool     // calls the status message does not show yet
 	shown              time.Time
-	attachmentExpected bool   // a run call only printed the delivery directive
-	deliveryRecovery   bool   // one corrective model step has already been requested
-	deliveryErr        error  // any progress reply/attachment that failed to send
-	actionReceipt      string // confirmed executed Slack action, not an assistant assertion
-	actionFailed       bool   // sender action returned no authoritative receipt
+	attaching          map[string]bool // call ids whose run printed an attachment directive
+	sending            map[string]bool // call ids that ran the Slack sender
+	attachmentExpected bool            // a run call only printed the delivery directive
+	deliveryRecovery   bool            // one corrective model step has already been requested
+	deliveryErr        error           // any progress reply/attachment that failed to send
+	actionReceipt      string          // confirmed executed Slack action, not an assistant assertion
+	actionFailed       bool            // sender action returned no authoritative receipt
 
 	// Set when the turn is done, for its last status.
 	done    bool
@@ -252,12 +265,10 @@ type turn struct {
 	used    int // percent of the context used, or -1
 }
 
-// task is one call of a turn: its tool and worker, its command or path, and
-// its status: in_progress, complete or error.
+// task is one call of a turn as its status message shows it: its tool and
+// worker, its command or path, and its status: in_progress, complete or error.
 type task struct {
 	id, title, detail, status string
-	attachment                bool
-	slackAction               bool
 }
 
 // maxTasks is the most calls a turn keeps, as many as a Slack plan block holds.
@@ -330,50 +341,12 @@ const notifyAfter = 2 * time.Minute
 // reply posts the agent's text. A line "attach: /path" sends that file from
 // this machine with it, in place of the line.
 func (b *bridge) reply(th, text, replyTo string, notify bool) error {
-	var lines, notes []string
-	var files []file
-	var errs []error
-	fence := ""
-	for _, l := range strings.Split(text, "\n") {
-		trimmed := strings.TrimSpace(l)
-		if strings.HasPrefix(trimmed, "```") || strings.HasPrefix(trimmed, "~~~") {
-			marker := trimmed[:3]
-			if fence == "" {
-				fence = marker
-			} else if fence == marker {
-				fence = ""
-			}
-			lines = append(lines, l)
-			continue
-		}
-		if fence != "" {
-			lines = append(lines, l)
-			continue
-		}
-		path, topLevel, ok := attachment(trimmed)
-		if ok && topLevel && platform(th) != "slack" {
-			ok = false // attach-channel is Slack's
-		}
-		if !ok {
-			lines = append(lines, l)
-			continue
-		}
-		data, err := os.ReadFile(path)
-		if err == nil && len(data) > maxAttach {
-			err = fmt.Errorf("%s is over %d MiB", path, maxAttach>>20)
-		}
-		if err != nil {
-			notes = append(notes, "could not attach: "+err.Error())
-			errs = append(errs, err)
-			continue
-		}
-		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }, topLevel: topLevel})
-	}
-	text = strings.TrimSpace(strings.Join(lines, "\n"))
+	kept, files, notes, errs := splitAttachments(text, platform(th) == "slack")
+	text = strings.TrimSpace(strings.Join(kept, "\n"))
 	if text == "" && len(notes) == 0 && len(files) == 0 {
 		return nil
 	}
-	return errors.Join(errors.Join(errs...), b.say(th, msg{Text: text, Note: strings.Join(notes, "\n"), ReplyTo: replyTo, Notify: notify, Files: files}))
+	return errors.Join(errs, b.say(th, msg{Text: text, Note: strings.Join(notes, "\n"), ReplyTo: replyTo, Notify: notify, Files: files}))
 }
 
 // The bot's reaction on a message the session was sent: seen while the

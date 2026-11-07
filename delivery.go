@@ -2,6 +2,10 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,26 +39,70 @@ func attachment(line string) (path string, topLevel bool, ok bool) {
 	return "", false, false
 }
 
-func hasAttachment(text string) bool {
+// scanText walks text's lines with fn, telling it whether each line is
+// inside a code fence, where an attach: directive is an example, not a
+// request. Fence marker lines are inside neither.
+func scanText(text string, fn func(line string, inFence bool)) {
 	fence := ""
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if strings.HasPrefix(line, "```") || strings.HasPrefix(line, "~~~") {
+	for _, l := range strings.Split(text, "\n") {
+		t := strings.TrimSpace(l)
+		if strings.HasPrefix(t, "```") || strings.HasPrefix(t, "~~~") {
 			if fence == "" {
-				fence = line[:3]
-			} else if fence == line[:3] {
+				fence = t[:3]
+			} else if fence == t[:3] {
 				fence = ""
 			}
+			fn(l, false)
 			continue
 		}
-		if fence != "" {
-			continue
-		}
-		if _, _, ok := attachment(line); ok {
-			return true
-		}
+		fn(l, fence != "")
 	}
-	return false
+}
+
+func hasAttachment(text string) bool {
+	found := false
+	scanText(text, func(line string, inFence bool) {
+		if !inFence {
+			if _, _, ok := attachment(strings.TrimSpace(line)); ok {
+				found = true
+			}
+		}
+	})
+	return found
+}
+
+// splitAttachments divides the agent's text at its attach: directives,
+// outside code fences: the lines to keep, the files the directives name
+// (read from this machine, at most maxAttach), notes for the ones that
+// failed, and their error. attach-channel: is Slack's; with slack false it
+// stays an ordinary line.
+func splitAttachments(text string, slack bool) (kept []string, files []file, notes []string, errs error) {
+	var es []error
+	scanText(text, func(l string, inFence bool) {
+		if inFence {
+			kept = append(kept, l)
+			return
+		}
+		path, topLevel, ok := attachment(strings.TrimSpace(l))
+		if ok && topLevel && !slack {
+			ok = false
+		}
+		if !ok {
+			kept = append(kept, l)
+			return
+		}
+		data, err := os.ReadFile(path)
+		if err == nil && len(data) > maxAttach {
+			err = fmt.Errorf("%s is over %d MiB", path, maxAttach>>20)
+		}
+		if err != nil {
+			notes = append(notes, "could not attach: "+err.Error())
+			es = append(es, err)
+			return
+		}
+		files = append(files, file{name: filepath.Base(path), size: len(data), fetch: func() ([]byte, error) { return data, nil }, topLevel: topLevel})
+	})
+	return kept, files, notes, errors.Join(es...)
 }
 
 func attachmentCall(body []byte) bool {
