@@ -786,12 +786,16 @@ func describe(info *slack.Channel, names []string) string {
 // frame is the prefix of a message: its author and Slack mention. When where is
 // set (a session's first message), a note first tells the agent it is a Slack
 // app, where the thread is, and how its replies show.
+// slackNotePrefix starts the note frame puts on a session's first message,
+// which continuationContext strips when it carries the framing over.
+const slackNotePrefix = "(Note from the Slack bridge:"
+
 func frame(bot, where, author, user string) string {
 	line := "[" + author + " <@" + user + ">]: "
 	if where == "" {
 		return line
 	}
-	return "(Note from the Slack bridge: you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
+	return slackNotePrefix + " you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
 		". What you write is posted to the thread as Slack messages, so use Slack formatting. Several people may write here; " +
 		"each message starts with its author's name and Slack mention, and writing a mention such as <@" + user +
 		"> notifies that person.)\n\n" + line

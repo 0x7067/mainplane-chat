@@ -84,7 +84,7 @@ func continuationContext(recs []statefile.Record) string {
 			}
 			continue
 		}
-		if strings.HasPrefix(body, "(Note from the Slack bridge:") {
+		if strings.HasPrefix(body, slackNotePrefix) {
 			if note, rest, ok := strings.Cut(body, "\n\n"); ok {
 				framing, body = note, rest
 			}
@@ -296,7 +296,7 @@ func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) 
 				break
 			}
 		}
-		if first == nil || strings.Contains(string(first.Body), "Current requests:\n") {
+		if first == nil || strings.Contains(string(first.Body), requestsHeading) {
 			break
 		}
 		previous := continued(string(first.Body))
