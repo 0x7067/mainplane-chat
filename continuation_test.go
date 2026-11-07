@@ -323,3 +323,80 @@ func TestPartialMultipartSendIsNotComplete(t *testing.T) {
 		t.Fatal("partial message moved the thread")
 	}
 }
+
+func TestContextFull(t *testing.T) {
+	for body, want := range map[string]bool{
+		"context 250009 exceeds limit 250000":                      true,
+		"context 8300 exceeds limit 8200":                          true,
+		"The session was stopped during the last step by discord.": false,
+		"anthropic: 529 overloaded":                                false,
+	} {
+		if got := contextFull(body); got != want {
+			t.Errorf("contextFull(%q) = %v", body, got)
+		}
+	}
+}
+
+func TestProviderFull(t *testing.T) {
+	for body, want := range map[string]bool{
+		`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"request (65537 tokens) exceeds the available context size (65536 tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":65537,"n_ctx":65536}}`: true,
+		`openai-chat: 400 Bad Request: {"error":{"code":"context_length_exceeded","message":"maximum context length"}}`:                                                                                                                         true,
+		`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"Field 'max_tokens': Value must be between -1 <= value <= 2147483647, but got -5"}}`:                                                                                      false,
+		"context 250009 exceeds limit 250000": false,
+	} {
+		if got := providerFull(body); got != want {
+			t.Errorf("providerFull(%q) = %v, want %v", body, got, want)
+		}
+	}
+}
+
+func TestHistoryOverflow(t *testing.T) {
+	llama := func(req, ctx int) string {
+		return fmt.Sprintf(`openai-chat: 400 Bad Request: {"error":{"code":400,"message":"request (%d tokens) exceeds the available context size (%d tokens), try increasing it","type":"exceed_context_size_error","n_prompt_tokens":%d,"n_ctx":%d}}`, req, ctx, req, ctx)
+	}
+	openai := `openai-chat: 400 Bad Request: {"error":{"message":"This model's maximum context length is 128000 tokens. However, your messages resulted in 128500 tokens.","code":"context_length_exceeded"}}`
+	for _, c := range []struct {
+		name string
+		body string
+		used int
+		want bool
+	}{
+		{"history filled the window (the inventory M4 session)", llama(65537, 65536), 65427, true},
+		{"window smaller than the configured limit", llama(65600, 65536), 65000, true},
+		{"one huge message late in a session", llama(115000, 65536), 40000, false},
+		{"one huge message in a fresh session", llama(200025, 65536), 0, false},
+		{"openai, history", openai, 127000, true},
+		{"openai, huge message", openai, 20000, false},
+		{"llama-server JSON with spaces", `{"type":"exceed_context_size_error","n_prompt_tokens": 65537,"n_ctx": 65536}`, 65427, true},
+		{"openai, 'you requested'", `This model's maximum context length is 8192 tokens. However, you requested 9000 tokens (8800 in the messages, 200 in the completion). context_length_exceeded`, 8000, true},
+		{"no sizes in the error", `openai-chat: 400 Bad Request: {"error":{"code":"context_length_exceeded"}}`, 60000, false},
+	} {
+		if got := historyOverflow(c.body, c.used); got != c.want {
+			t.Errorf("%s: historyOverflow = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+func TestContinued(t *testing.T) {
+	for msg, want := range map[string]string{
+		"You are continuing session 5b733adb. Retrieve key context from it as you go.":           "5b733adb",
+		"You are continuing session 5b733adb. Retrieve key context from it as you go.\nnow do X": "5b733adb",
+		"You are continuing session nope. x":                                                     "",
+		"please continue session 5b733adb":                                                       "",
+		"":                                                                                       "",
+	} {
+		if got := continued(msg); got != want {
+			t.Errorf("continued(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
+func TestFresh(t *testing.T) {
+	now := time.Date(2026, 11, 3, 11, 52, 0, 0, time.UTC)
+	if !recent(now.Add(-30*time.Second), now) {
+		t.Error("an error 30 s old (the bot restarted meanwhile) must continue")
+	}
+	if recent(now.Add(-31*time.Minute), now) {
+		t.Error("an error 31 min old, replayed after a restart, must not continue")
+	}
+}

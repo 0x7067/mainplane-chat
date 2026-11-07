@@ -14,6 +14,13 @@ import (
 // errNoModel is a new session with nothing to start from: no session to copy
 // and no catalog model connected. The harness cannot list a provider's models,
 // so a model outside the catalog is known only once a session has used it.
+// The catalog groups the terminal app reads: the models it offers, and the
+// ones a new session takes when the newest session's is not connected.
+const (
+	group    = "self-hosted-all"
+	defaults = "self-hosted-default"
+)
+
 var errNoModel = errors.New("no model to start from: make one session with `mainplane new`; new threads then copy the newest session's model")
 
 // choices is what a session can run on: the catalog's presets whose provider

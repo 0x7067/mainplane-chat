@@ -1,9 +1,14 @@
 package main
 
 import (
+	"cmp"
 	"fmt"
+	"log"
+	"regexp"
 	"slices"
+	"strconv"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/mainplane-ai/mainplane/pkg/provider"
@@ -143,4 +148,194 @@ func handoffExcerpt(s string, limit int) string {
 		start++
 	}
 	return s[:runeStart(s, half)] + gap + s[start:]
+}
+
+func contextFull(body string) bool {
+	return strings.HasPrefix(body, "context ") && strings.Contains(body, " exceeds limit ")
+}
+
+func providerFull(body string) bool {
+	return strings.Contains(body, "exceed_context_size_error") || strings.Contains(body, "context_length_exceeded")
+}
+
+var (
+	llamaPrompt = regexp.MustCompile(`"n_prompt_tokens"\s*:\s*(\d+)`)
+	llamaCtx    = regexp.MustCompile(`"n_ctx"\s*:\s*(\d+)`)
+	openaiCtx   = regexp.MustCompile(`maximum context length is (\d+) tokens`)
+	openaiReq   = regexp.MustCompile(`(?:resulted in|you requested) (\d+) tokens`)
+)
+
+func overflowSizes(body string) (request, window int) {
+	num := func(re *regexp.Regexp) int {
+		if m := re.FindStringSubmatch(body); m != nil {
+			n, _ := strconv.Atoi(m[1])
+			return n
+		}
+		return 0
+	}
+	return cmp.Or(num(llamaPrompt), num(openaiReq)), cmp.Or(num(llamaCtx), num(openaiCtx))
+}
+
+func historyOverflow(body string, used int) bool {
+	request, window := overflowSizes(body)
+	return request > 0 && window > 0 && (request-used)*2 < window
+}
+
+func recent(at, now time.Time) bool {
+	return now.Sub(at) < 10*time.Minute
+}
+
+func (b *bridge) endedFull(id, body string) bool {
+	if contextFull(body) {
+		return true
+	}
+	lengthStop := strings.HasPrefix(body, `The last step ended with stop "length"`) || strings.HasPrefix(body, `The last step ended with stop "max_tokens"`)
+	if !providerFull(body) && !lengthStop {
+		return false
+	}
+	i, err := b.info(id)
+	if err != nil {
+		return false
+	}
+	// ContextUsed counts only the prompt. A long thinking/reply block from
+	// that step is now history too, even when no later step succeeded.
+	recs, err := b.records(id, 0, "")
+	if err != nil {
+		return false
+	}
+	used := i.ContextUsed
+	if step := statefile.LastStep(recs); step != nil && step.Usage != nil {
+		used = step.Usage.Prompt() + step.Usage.Output
+	}
+	if lengthStop {
+		return i.Config.ContextLimit > 0 && used >= i.Config.ContextLimit
+	}
+	return historyOverflow(body, used)
+}
+
+const fullKey = "context-full-"
+
+func (b *bridge) continueFull(th, id string) bool {
+	b.mu.Lock()
+	taken := b.full[id]
+	b.full[id] = true
+	b.mu.Unlock()
+	if taken {
+		return true
+	}
+	text := autoContinueText
+	if recs, err := b.records(id, 0, ""); err == nil {
+		if stalledContinuation(recs) {
+			b.mu.Lock()
+			delete(b.full, id)
+			b.mu.Unlock()
+			b.say(th, msg{Text: "Automatic continuation stopped: the new session filled before making progress. Use !model to choose a larger context, or !continue with a shorter task."})
+			return false
+		}
+	}
+	if _, err := b.continueIn(th, id, fullKey+id, "", text); err != nil {
+		b.mu.Lock()
+		delete(b.full, id) // a transient failure must not poison later recovery
+		b.mu.Unlock()
+		b.say(th, msg{Text: "automatic /continue failed: " + err.Error()})
+		return false
+	}
+	return true
+}
+
+const continuePrefix = "You are continuing session "
+
+func continued(msg string) string {
+	rest, ok := strings.CutPrefix(msg, continuePrefix)
+	if !ok {
+		return ""
+	}
+	id, _, _ := strings.Cut(rest, ".")
+	if statefile.ValidID(id) {
+		return id
+	}
+	return ""
+}
+
+func (b *bridge) continueIn(th, old, msgID, model, text string) (string, error) {
+	cur, err := b.info(old)
+	if err != nil {
+		return "", err
+	}
+	conf := cur.Config
+	if model != "" {
+		ch, _, err := b.choices()
+		if err != nil {
+			return "", err
+		}
+		if conf, err = ch.switchConf(cur.Config, model); err != nil {
+			return "", err
+		}
+	}
+	recs, err := b.records(old, 0, "")
+	if err != nil {
+		return "", fmt.Errorf("read continuation context: %w", err)
+	}
+	// Upgrade old pointer-only continuations too. Read their predecessor's
+	// snapshot, not messages sent to it after this conversation had moved on.
+	contextRecords, ancestor := recs, recs
+	visited := map[string]bool{old: true}
+	for range 3 {
+		var first *statefile.Record
+		for i := range ancestor {
+			if ancestor[i].Kind == statefile.Message {
+				first = &ancestor[i]
+				break
+			}
+		}
+		if first == nil || strings.Contains(string(first.Body), "Current requests:\n") {
+			break
+		}
+		previous := continued(string(first.Body))
+		if previous == "" || visited[previous] {
+			break
+		}
+		visited[previous] = true
+		previousRecords, readErr := b.records(previous, 0, "")
+		if readErr != nil {
+			log.Printf("older continuation %s: %v", previous, readErr)
+			break
+		}
+		ancestor = slices.DeleteFunc(previousRecords, func(r statefile.Record) bool { return r.Time.After(first.Time) })
+		contextRecords = append(slices.Clone(ancestor), contextRecords...)
+	}
+	m := continuePrefix + old + ". Continue the task using the handoff below; retrieve older context only if a specific fact is missing."
+	m += "\n\n" + continuationContext(contextRecords)
+	if paths := b.logPaths(old, cur.Config); len(paths) > 0 {
+		m += "\nOlder records (only if needed): " + strings.Join(paths, ", ") + ". " + logFormatNote
+	}
+	if text != "" {
+		m += "\n\nContinuation instruction:\n" + text
+	}
+	id, err := b.create(conf, platform(th))
+	if err != nil {
+		return "", err
+	}
+	b.say(th, msg{Note: "continuing in session " + id + " on " + conf.Model})
+	others := b.threadsShowing(old)
+	if err := b.post(th, id, msgID, "", m, nil); err != nil {
+		// A lost response is not proof that the send failed. Delete only a
+		// session confirmed empty; never destroy potentially accepted work.
+		if pending, readErr := b.records(id, 0, ""); readErr == nil && !slices.ContainsFunc(pending, func(r statefile.Record) bool { return r.Kind == statefile.Message }) {
+			if cleanup := b.call("DELETE", "/sessions/"+id, "", nil, nil); cleanup != nil {
+				log.Printf("remove empty continuation %s: %v", id, cleanup)
+			}
+		} else {
+			b.say(th, msg{Note: "Could not confirm delivery to session " + id + "; preserved it for inspection. The thread still follows " + old + "."})
+		}
+		return "", err
+	}
+	for _, o := range others {
+		if o == th {
+			continue
+		}
+		b.follow(o, id, 0)
+		b.say(o, msg{Note: "continued in session " + id})
+	}
+	return id, nil
 }

@@ -88,7 +88,7 @@ func (b *bridge) finishStep(th, id string, t *turn, r statefile.Record) {
 		return
 	}
 	t.text = nil
-	if t.deliveryRecovery || !fresh(r.Time, time.Now()) || !b.shows(th, id) {
+	if t.deliveryRecovery || !recent(r.Time, time.Now()) || !b.shows(th, id) {
 		b.finish(th, id, t, "failed")
 		b.say(th, msg{Text: "⚠️ No file was uploaded: the agent did not produce an assistant attachment. Automatic correction has stopped.", Session: id, Retry: true})
 		return
