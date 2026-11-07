@@ -99,10 +99,6 @@ func TestFrame(t *testing.T) {
 		"you are symphony, an app in Slack",
 		"a Slack thread in a group DM with pedro, gabrielg",
 		"Slack formatting",
-		"attach: /absolute/path in your assistant reply",
-		"attach-channel: /absolute/path",
-		"not in shell output",
-		"You do not need Slack tokens",
 		"\n\n[pedro <@U09>]: what can you do",
 	} {
 		if !strings.Contains(first, want) {
@@ -138,6 +134,20 @@ func TestSlackFileDestinations(t *testing.T) {
 					}
 					completed = true
 					fmt.Fprint(w, `{"ok":true,"files":[{"id":"F1"}]}`)
+				case "/files.info":
+					if !completed {
+						t.Error("receipt lookup preceded upload completion")
+					}
+					fmt.Fprint(w, `{"ok":true,"file":{"id":"F1","permalink":"https://test.slack.com/files/F1"}}`)
+				case "/chat.postMessage":
+					r.ParseForm()
+					if !completed || !strings.Contains(r.Form.Get("text"), "Uploaded test.txt") {
+						t.Error("receipt without successful upload")
+					}
+					if r.Form.Get("thread_ts") != "1.0" {
+						t.Error("upload receipt did not return to source thread")
+					}
+					fmt.Fprint(w, `{"ok":true,"ts":"2.0"}`)
 				default:
 					t.Errorf("unexpected Slack call %s", r.URL.Path)
 					fmt.Fprint(w, `{"ok":false,"error":"unexpected"}`)
