@@ -8,6 +8,10 @@ import (
 	"github.com/mainplane-ai/mainplane/pkg/statefile"
 )
 
+// maxAttach is the largest file an agent's "attach: /path" sends: Discord's
+// upload limit, which is below Slack's.
+const maxAttach = 20 << 20
+
 // Correct a model that tried to upload by printing the attachment protocol
 // from run. This is model feedback, NEVER permission to upload tool stdout.
 const deliveryKey = "attachment-help-"
