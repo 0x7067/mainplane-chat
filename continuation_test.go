@@ -21,9 +21,10 @@ type testChat struct {
 	messages  []msg
 	statuses  []turn
 	reactions []string
+	sendErr   error
 }
 
-func (c *testChat) say(_ string, m msg)          { c.messages = append(c.messages, m) }
+func (c *testChat) say(_ string, m msg) error    { c.messages = append(c.messages, m); return c.sendErr }
 func (c *testChat) status(_, _ string, tr *turn) { c.statuses = append(c.statuses, *tr) }
 func (c *testChat) react(_, _, emoji string)     { c.reactions = append(c.reactions, emoji) }
 func (c *testChat) rename(_, _, _ string)        {}
@@ -244,7 +245,7 @@ func TestContinuationTransaction(t *testing.T) {
 			if got := b.sessionFor("slack:C1/1.0"); got != want {
 				t.Errorf("session=%s want %s", got, want)
 			}
-			if retried || deleted != failSend || !strings.Contains(posted, "draw a pelican") || !strings.Contains(posted, "attach-channel:") {
+			if retried || deleted != failSend || !strings.Contains(posted, "draw a pelican") || !strings.Contains(posted, "mainplane-chat slack post") {
 				t.Errorf("retry=%v cleanup=%v handoff=%s", retried, deleted, posted)
 			}
 			if !strings.Contains(posted, "your current Mainplane session is eeeeeeee") || !strings.HasPrefix(posted, continuePrefix+"abcd1234.") {

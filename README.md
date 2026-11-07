@@ -21,6 +21,8 @@
 - **A thread per session.** A message in a channel (Discord), or a DM or a mention of the app in a Slack channel or group DM, starts a session in a thread. Replies in the thread continue it (in a Slack channel or group DM, only replies that mention the app).
 - **Live status.** One message shows the running turn: its time, its last tool calls and a Stop button. When the turn ends, it shrinks to one line: `14 calls · 2m31s · 38% context`.
 - **Files in both directions.** Send images and text files with a message. The agent sends a file back with a standalone line `attach: /path/to/file` in its reply (not shell output or a code block). In Slack, `attach-channel: /path/to/file` shares it as a top-level file in the same channel.
+- **Executed Slack actions.** Agents can run `mainplane-chat slack post --text '...' [--file /path]` to create a real top-level channel message, or `slack reply` for the source thread. The sender resolves the destination from `MAINPLANE_SESSION`, executes the API call, and returns a confirmed message permalink. Retrying the same payload for one request reuses its durable receipt.
+- **Checked delivery.** File delivery finishes before the turn gets ✅. Read/upload failures fail the turn. If the model only prints an attachment directive from `run`, the bridge suppresses its unsupported final claim and requests one corrective reply; tool stdout itself never uploads files. Slack top-level uploads get a receipt back in the source thread.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
 - **Recovery.** A failed step comes with a Retry button and a model picker. When a provider's quota runs out, continue on another model in one click.
 - **Context recovery.** When a session fills its context, the bot continues it in a new session with a bounded handoff of the requests and recent tool results. The thread follows. Provider context errors count as full when the history, including the last generated output, filled the window; a length-limited step that fills the session also continues. One oversized message keeps Retry. Retry recovers a full session even after downtime. If a fresh automatic continuation fills before making progress, the bot stops rather than looping.
@@ -94,6 +96,21 @@ printf 'list the files in /tmp\n' | MAINPLANE_KEY=... mainplane-chat -console
 ```
 
 ## Details
+
+### Slack sender for agents
+
+Make the binary and its existing `SLACK_BOT_TOKEN` available to `run` on the bridge's worker, usually with a deployment-owned wrapper that loads the service env without showing it. The sender needs no app token, harness key, new Slack scope, or listener. Tell agents which worker runs it. Normal final text still replies to the source thread; outgoing actions are executed commands:
+
+```sh
+mainplane-chat slack post --text 'A new channel message'
+mainplane-chat slack post --file /absolute/path/image.png --text 'Caption'
+mainplane-chat slack reply --text 'A reply in the source thread'
+mainplane-chat slack receipt --key <receipt-id>
+```
+
+`post` never accepts a thread target. `reply` defaults to the source thread. `--channel` selects another channel the bot can already access; an explicit reply destination also needs `--thread`. An ambiguous/missing session mapping fails instead of guessing. `--session` overrides `MAINPLANE_SESSION` for operator use.
+
+Only `ok:true`, `state:confirmed` and a `permalink` are success. If a response is uncertain, inspect its receipt rather than sending again. Same-payload retries within one chat request are deduplicated across continuations; for an intentionally separate repeat, use a distinct `--key <name>`. Receipts under the state directory's `slack-actions/` contain metadata and content hashes, not message/file contents or credentials. The bridge validates this journal before treating a tool result as delivery evidence; arbitrary stdout is not a receipt.
 
 <details>
 <summary>Discord</summary>
