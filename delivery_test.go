@@ -171,7 +171,7 @@ func TestExistingSlackMessagesAlwaysGetDeliveryProtocol(t *testing.T) {
 	b.following[[2]string{"slack:C1/1.0", "abcd1234"}] = true
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data, _ := io.ReadAll(r.Body)
-		for _, want := range []string{"not in shell output", "attach-channel:", "current Mainplane session is abcd1234"} {
+		for _, want := range []string{"mainplane-chat slack post", "NEW TOP-LEVEL CHANNEL MESSAGE", "current Mainplane session is abcd1234"} {
 			if !strings.Contains(string(data), want) {
 				t.Errorf("message lacks %q", want)
 			}

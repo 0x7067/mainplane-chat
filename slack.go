@@ -784,7 +784,7 @@ func frame(bot, where, author, user string) string {
 		"> notifies that person.)\n\n" + line
 }
 
-const slackDeliveryNote = "To send a file, put a standalone line attach: /absolute/path in your assistant reply (not in shell output, a tool call, or a code block). The bridge uploads it to this thread. For a top-level file in this same channel, use attach-channel: /absolute/path instead. Files must exist on the bridge's machine; copy files from other workers there first. You do not need Slack tokens or API calls. Do not send files into a Mainplane session with mainplane message: that is model input, not a Slack upload. Do not claim delivery without emitting the attachment line; upload errors are reported in Slack."
+const slackDeliveryNote = "For Slack sending, execute mainplane-chat slack post --text 'message' and/or --file /absolute/path via run on the bridge worker. post always creates a NEW TOP-LEVEL CHANNEL MESSAGE. To send inside this thread, use mainplane-chat slack reply instead. MAINPLANE_SESSION automatically selects this conversation; do not guess a channel or session id. The installed sender handles credentials and returns JSON with ok:true and the actual Slack message permalink. Only report delivery after that confirmed receipt. Do not merely echo the command, print attach: lines, read image bytes, or use mainplane message. Files must exist on the bridge worker; copy other workers' files there first. Normal final text still replies in this thread."
 
 // fullMember is a person with a regular account in the given workspace: not a
 // guest (single- or multi-channel), not from another organization through

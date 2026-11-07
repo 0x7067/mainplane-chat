@@ -12,7 +12,7 @@ import (
 // from run. This is model feedback, NEVER permission to upload tool stdout.
 const deliveryKey = "attachment-help-"
 
-const deliveryCorrection = "Delivery correction from the chat bridge: your run call only printed an attachment instruction. No file was uploaded. Do not repeat the shell command or claim it was sent. Put the actual file's standalone attach: /absolute/path line directly in your assistant reply, with no code fence. If the user requested a top-level Slack message, use attach-channel: /absolute/path instead. The bridge performs and checks the upload. Reply with the directive now; do not use tools."
+const deliveryCorrection = "Delivery correction from the chat bridge: the tool only printed an attachment instruction. No file was uploaded. Execute mainplane-chat slack post --file /absolute/path via run on the bridge worker for the user's requested TOP-LEVEL CHANNEL POST, or mainplane-chat slack reply --file /absolute/path if they requested a thread reply. MAINPLANE_SESSION selects this conversation. Read the returned JSON receipt; only say sent if ok:true and give its permalink. Do not echo commands, print attach: lines, or send input to Mainplane sessions."
 
 func bridgeMessage(key string) bool {
 	return strings.HasPrefix(key, fullKey) || strings.HasPrefix(key, deliveryKey)
@@ -61,6 +61,17 @@ func attachmentCall(body []byte) bool {
 // A shell echo is not a delivery. Suppress the unsupported final claim,
 // carry the user's pending reaction, and allow ONE corrective model turn.
 func (b *bridge) finishStep(th, id string, t *turn, r statefile.Record) {
+	if t.actionFailed {
+		t.text = nil
+		b.finish(th, id, t, "failed")
+		b.say(th, msg{Text: "⚠️ Slack delivery was not confirmed. The sender did not return a valid receipt; inspect its error or pending receipt before retrying.", Session: id, Retry: true})
+		return
+	}
+	if t.actionReceipt != "" && hasAttachment(strings.Join(t.text, "\n\n")) {
+		// The executed action already sent the file. Do not upload it again
+		// just because the model also prints the old text protocol.
+		t.text = []string{"Posted: " + t.actionReceipt}
+	}
 	if !t.attachmentExpected || hasAttachment(strings.Join(t.text, "\n\n")) {
 		b.finish(th, id, t, "")
 		return
@@ -77,6 +88,22 @@ func (b *bridge) finishStep(th, id string, t *turn, r statefile.Record) {
 	if err := b.post(th, id, deliveryKey+id+"-"+r.ID, "", deliveryCorrection, nil); err != nil {
 		b.finish(th, id, t, "failed")
 	}
+}
+
+func slackActionCall(body []byte) bool {
+	var call struct {
+		Name      string
+		Arguments map[string]any
+	}
+	if json.Unmarshal(body, &call) != nil || call.Name != "run" {
+		return false
+	}
+	for _, key := range []string{"code", "command"} {
+		if code, ok := call.Arguments[key].(string); ok && !strings.Contains(code, "--help") && !strings.Contains(code, " -h") && (strings.Contains(code, "mainplane-chat slack post") || strings.Contains(code, "mainplane-chat slack reply")) {
+			return true
+		}
+	}
+	return false
 }
 
 // Persist only delivery facts, so restarting between a tool result and the
