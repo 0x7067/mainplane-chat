@@ -414,6 +414,14 @@ func (b *bridge) post(th, id, msgID, prefix, text string, files []file) error {
 	req.Header.Set("Idempotency-Key", msgID)
 	b.mu.Lock()
 	b.sentIn[msgID] = th // before the send, as the thread's follower may relay it first
+	if t := b.st.Threads[th]; msgID != "" && t.Session == id && !slices.Contains(t.Sent, msgID) {
+		t.Sent = append(t.Sent, msgID)
+		if len(t.Sent) > sentKeys {
+			t.Sent = t.Sent[len(t.Sent)-sentKeys:]
+		}
+		b.st.Threads[th] = t
+		b.save() // a restart that relays this message must still know it is ours
+	}
 	b.mu.Unlock()
 	var out struct{ N int }
 	if err := b.do(req, &out); err != nil {

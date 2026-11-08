@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -56,6 +57,29 @@ func TestFailedPostLeavesMessageForCatchUp(t *testing.T) {
 	b.mark("slack:C1", "m1")
 	if b.unseen("slack:C1", "m1") {
 		t.Fatal("a marked message is still unseen")
+	}
+}
+
+func TestOwnMessageStillMineAfterRestart(t *testing.T) {
+	b, c := testCore(t)
+	b.following[[2]string{"slack:C1/1.0", "abcd1234"}] = true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `{"n":6}`)
+	}))
+	defer srv.Close()
+	b.harness = srv.URL
+	if err := b.post("slack:C1/1.0", "abcd1234", "my-message", "", "hello", nil); err != nil {
+		t.Fatal(err)
+	}
+	reloaded := &bridge{path: b.path, sentIn: map[string]string{}, chats: map[string]chat{"slack": c}}
+	reloaded.load()
+	if reloaded.sentIn["my-message"] != "slack:C1/1.0" {
+		t.Fatal("a posted message key did not survive the restart")
+	}
+	tr := &turn{}
+	reloaded.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Message, Via: "slack", Type: "text/plain", IdempotencyKey: "my-message"}, Body: []byte("hello")})
+	if len(c.messages) != 0 || !slices.Contains(tr.asked, "my-message") {
+		t.Fatal("the bridge quoted its own message or lost the reaction target")
 	}
 }
 

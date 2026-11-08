@@ -29,7 +29,13 @@ type thread struct {
 	ActionReceipt      string   `json:"action_receipt,omitempty"` // a confirmed sender action of the open turn
 	ActionFailed       bool     `json:"action_failed,omitempty"`  // a sender action of the open turn returned no receipt
 	Request            string   `json:"request,omitempty"`        // latest genuine chat request; stable through auto-continuation
+	Sent               []string `json:"sent,omitempty"`           // newest chat message keys posted to this session, so a restart knows its own
 }
+
+// sentKeys is how many posted message keys a thread remembers: a restart
+// must still recognize the messages not relayed yet, without the state
+// growing with every message ever sent.
+const sentKeys = 20
 
 func (b *bridge) threadsShowing(id string) []string {
 	b.mu.Lock()
@@ -151,6 +157,11 @@ func (b *bridge) load() {
 	}
 	if b.st.Threads == nil {
 		b.st.Threads = map[string]thread{}
+	}
+	for th, t := range b.st.Threads {
+		for _, k := range t.Sent {
+			b.sentIn[k] = th
+		}
 	}
 	if b.st.MirrorSince.IsZero() {
 		b.st.MirrorSince = time.Now().UTC()
