@@ -127,6 +127,18 @@ func TestShellEchoCannotFinishAsDelivery(t *testing.T) {
 	}
 }
 
+func TestUndeliveredQuoteFailsTheTurn(t *testing.T) {
+	b, c := testCore(t)
+	c.sendErr = errors.New("chat down")
+	tr := &turn{start: time.Now(), asked: []string{"question"}}
+	b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Message, Via: "cli", Type: "text/plain"}, Body: []byte("a status from elsewhere")})
+	c.sendErr = nil
+	b.finish("slack:C1/1.0", "abcd1234", tr, "")
+	if c.statuses[len(c.statuses)-1].outcome != "failed" {
+		t.Fatal("a lost quote did not fail the turn")
+	}
+}
+
 func TestDeliveryCorrectionDoesNotLoop(t *testing.T) {
 	b, c := testCore(t)
 	tr := &turn{start: time.Now(), attachmentExpected: true, deliveryRecovery: true, text: []string{"I've sent it."}, asked: []string{"question"}}

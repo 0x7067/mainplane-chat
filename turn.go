@@ -136,9 +136,9 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		// a job's report is one line: its log tail floods the thread.
 		switch {
 		case r.Via == "job" && strings.HasPrefix(r.Type, "text/plain"):
-			b.say(th, msg{Note: jobLine(string(r.Body))})
+			t.deliveryErr = errors.Join(t.deliveryErr, b.say(th, msg{Note: jobLine(string(r.Body))}))
 		case !mine && !internal && r.Via != "retry" && strings.HasPrefix(r.Type, "text/plain"):
-			b.say(th, msg{Text: quote(r.Via, string(r.Body))})
+			t.deliveryErr = errors.Join(t.deliveryErr, b.say(th, msg{Text: quote(r.Via, string(r.Body))}))
 		}
 		// Every turn asked or retried, from anywhere, shows on the thread itself.
 		if r.Via != "job" && strings.HasPrefix(r.Type, "text/plain") && !slices.Contains(t.asked, "") {
