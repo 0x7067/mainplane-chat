@@ -22,11 +22,11 @@
 - **Live status.** One message shows the running turn: its time, its last tool calls and a Stop button. When the turn ends, it shrinks to one line: `14 calls · 2m31s · 38% context`.
 - **Files in both directions.** Send images and text files with a message. The agent sends a file back with a standalone line `attach: /path/to/file` in its reply (not shell output or a code block). In Slack, `attach-channel: /path/to/file` shares it as a top-level file in the same channel.
 - **Executed Slack actions.** Agents can run `mainplane-chat slack post --text '...' [--file /path]` to create a real top-level channel message, or `slack reply` for the source thread. The sender resolves the destination from `MAINPLANE_SESSION`, executes the API call, and returns a confirmed message permalink. Retrying the same payload for one request reuses its durable receipt.
-- **Checked delivery.** File delivery finishes before the turn gets ✅. Read/upload failures fail the turn. If the model only prints an attachment directive from `run`, the bridge suppresses its unsupported final claim and requests one corrective reply; tool stdout itself never uploads files. Slack top-level uploads get a receipt back in the source thread.
+- **Checked delivery.** File delivery finishes before the turn gets ✅. Read/upload failures fail the turn, and so does a reply, quote or job report that could not be posted. If the model only prints an attachment directive from `run`, the bridge suppresses its unsupported final claim and requests one corrective reply; tool stdout itself never uploads files. Slack top-level uploads get a receipt back in the source thread.
 - **Every connector, one conversation.** Sessions started in the terminal app or CLI get a thread in `#sessions`. Messages sent from elsewhere show in the thread with their source.
 - **Recovery.** A failed step comes with a Retry button and a model picker. When a provider's quota runs out, continue on another model in one click.
 - **Context recovery.** When a session fills its context, the bot continues it in a new session with a bounded handoff of the requests and recent tool results. The thread follows. Provider context errors count as full when the history, including the last generated output, filled the window; a length-limited step that fills the session also continues. One oversized message keeps Retry. Retry recovers a full session even after downtime. If a fresh automatic continuation fills before making progress, the bot stops rather than looping.
-- **Catches up.** What happens while the bot is down is picked up when it starts again.
+- **Catches up.** What happens while the bot is down is picked up when it starts again, and a message that failed to reach its session is tried again then too.
 - **Slack agent sessions.** In Slack, a thread is a native agent session, with its title, working state and Stop button.
 
 <p align="center">
@@ -122,6 +122,7 @@ Only `ok:true`, `state:confirmed` and a `permalink` are success. If a response i
 - A thread whose session is deleted is archived and locked. In `#sessions`, its post is deleted too, so the channel lists live sessions. When a session gets a name, its thread is renamed `<id> <name>`.
 - The final reply is a Discord reply to the message it answers. It notifies you when the turn took over two minutes.
 - Each message sent to a session gets a reaction: 👀 while the agent works, then ✅ or ❌. The start messages in a channel, and the posts in `#sessions`, show how each session's last turn went.
+- A Retry button, model picker or Stop names the session it was posted with; once the thread has left that session, it says so and does nothing, as in Slack.
 - The bot reads an `attach:` file on its own machine, up to 20 MiB, and uploads it in place of the line.
 - Files sent with a message go to the session: images as images (up to 5 MiB), text files inline (up to 200 KiB). Others are listed as not sent.
 - A thread follows a continuation made anywhere: `/model` or `/continue` in the terminal app moves the thread to the new session too. Mainplane has no event for new sessions, so the bot checks the newest ones every 3 seconds, as the terminal app does.
