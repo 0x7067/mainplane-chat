@@ -207,7 +207,7 @@ func (s *slackChat) act(cb slack.InteractionCallback) {
 	th := s.thread(cb.Container.ChannelID, cb.Container.ThreadTs)
 	for _, a := range cb.ActionCallback.BlockActions {
 		if a.BlockID != s.b.sessionFor(th) {
-			s.say(th, msg{Note: "This control belongs to a previous session. Use !retry or !model in this thread for the current session."})
+			s.say(th, msg{Note: staleControl})
 			continue
 		}
 		text := "!" + a.ActionID
@@ -264,7 +264,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	}
 	root := cmp.Or(m.ThreadTimeStamp, m.TimeStamp)
 	th := s.thread(m.Channel, root)
-	if !hears(m.ChannelType, s.mention.MatchString(m.Text)) || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
+	if !hears(m.ChannelType, s.mention.MatchString(m.Text)) || !s.b.unseen(s.key(m.Channel), m.TimeStamp) {
 		return
 	}
 	// A user's message sent through another app, as slack-axi sends them, has
@@ -285,8 +285,10 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		return
 	}
 	if id := s.b.sessionFor(th); id != "" {
-		if !s.b.command(th, id, m.TimeStamp, text) {
-			s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, false), text, files)
+		if s.b.command(th, id, m.TimeStamp, text) {
+			s.b.mark(s.key(m.Channel), m.TimeStamp)
+		} else if err := s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, false), text, files); err == nil {
+			s.b.mark(s.key(m.Channel), m.TimeStamp)
 		}
 		return
 	}
@@ -310,7 +312,9 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	}
 	if err := s.b.start("slack", open, m.TimeStamp, s.framed(m.Channel, m.User, true), text, files); err != nil {
 		s.say(th, msg{Text: err.Error()})
+		return // nothing was delivered: catch-up after a restart reads it again
 	}
+	s.b.mark(s.key(m.Channel), m.TimeStamp)
 }
 
 // files are a message's files, downloaded with the bot token when needed. A
@@ -786,15 +790,31 @@ func describe(info *slack.Channel, names []string) string {
 // frame is the prefix of a message: its author and Slack mention. When where is
 // set (a session's first message), a note first tells the agent it is a Slack
 // app, where the thread is, and how its replies show.
+// slackNotePrefix starts the note frame puts on a session's first message,
+// which continuationContext strips when it carries the framing over.
+const slackNotePrefix = "(Note from the Slack bridge:"
+
 func frame(bot, where, author, user string) string {
 	line := "[" + author + " <@" + user + ">]: "
 	if where == "" {
 		return line
 	}
-	return "(Note from the Slack bridge: you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
+	return slackNotePrefix + " you are " + bot + ", an app in Slack. This conversation is a Slack thread in " + where +
 		". What you write is posted to the thread as Slack messages, so use Slack formatting. Several people may write here; " +
 		"each message starts with its author's name and Slack mention, and writing a mention such as <@" + user +
 		"> notifies that person.)\n\n" + line
+}
+
+// slackAuthor is the person frame's prefix names in a message body, or "".
+func slackAuthor(body string) string {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, "[") {
+			if author, _, ok := strings.Cut(line[1:], "]:"); ok && strings.Contains(author, "<@") {
+				return author
+			}
+		}
+	}
+	return ""
 }
 
 const slackDeliveryNote = "For Slack sending, execute mainplane-chat slack post --text 'message' and/or --file /absolute/path via run on the bridge worker. post always creates a NEW TOP-LEVEL CHANNEL MESSAGE. To send inside this thread, use mainplane-chat slack reply instead. MAINPLANE_SESSION automatically selects this conversation; do not guess a channel or session id. The installed sender handles credentials and returns JSON with ok:true and the actual Slack message permalink. Only report delivery after that confirmed receipt. Do not merely echo the command, print attach: lines, read image bytes, or use mainplane message. Files must exist on the bridge worker; copy other workers' files there first. Normal final text still replies in this thread."

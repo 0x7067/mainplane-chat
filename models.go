@@ -14,6 +14,13 @@ import (
 // errNoModel is a new session with nothing to start from: no session to copy
 // and no catalog model connected. The harness cannot list a provider's models,
 // so a model outside the catalog is known only once a session has used it.
+// The catalog groups the terminal app reads: the models it offers, and the
+// ones a new session takes when the newest session's is not connected.
+const (
+	group    = "self-hosted-all"
+	defaults = "self-hosted-default"
+)
+
 var errNoModel = errors.New("no model to start from: make one session with `mainplane new`; new threads then copy the newest session's model")
 
 // choices is what a session can run on: the catalog's presets whose provider
@@ -23,13 +30,12 @@ var errNoModel = errors.New("no model to start from: make one session with `main
 // the harness serves; the catalog only adds names and preset configs.
 type choices struct {
 	cat       catalog.Catalog
-	providers []string         // the providers the harness serves
-	recent    []statefile.Conf // the newest sessions' configs, newest first
+	providers []string // the providers the harness serves
 	ids       []string
 }
 
 func newChoices(cat catalog.Catalog, providers []string, recent []statefile.Conf) choices {
-	c := choices{cat: cat, providers: providers, recent: recent}
+	c := choices{cat: cat, providers: providers}
 	for _, id := range cat.Groups[group] {
 		if c.serves(cat.Presets[id].Provider + "/") {
 			c.ids = append(c.ids, id)
@@ -89,7 +95,7 @@ func (c choices) startConf(base *statefile.Conf) (statefile.Conf, error) {
 // (newest first) that a thread shows, so that sessions made elsewhere, such
 // as test runs on another model, do not move the chats; else, when no thread
 // shows a recent one, the newest. Nil when there are no sessions.
-func startBase(recent []info, shown []string) *statefile.Conf {
+func startBase(recent []sessionInfo, shown []string) *statefile.Conf {
 	for _, s := range recent {
 		if slices.Contains(shown, s.ID) {
 			return &s.Config

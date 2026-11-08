@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -38,6 +39,26 @@ func TestAttachmentIntentNotArbitraryToolOutput(t *testing.T) {
 		if got := attachmentCall([]byte(body)); got != want {
 			t.Errorf("intent %s = %v", body, got)
 		}
+	}
+}
+
+func TestEvictedCallStillCountsAsAttachmentIntent(t *testing.T) {
+	b, _ := testCore(t)
+	tr := &turn{start: time.Now()}
+	for i := 0; i <= maxTasks; i++ {
+		code := "cat /tmp/x"
+		if i == 0 {
+			code = "cat <<'EOF'\nattach: /tmp/image.png\nEOF"
+		}
+		body, _ := json.Marshal(map[string]any{"name": "run", "arguments": map[string]any{"code": code}})
+		b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Call, ID: fmt.Sprintf("c%02d", i)}, Body: body})
+	}
+	if len(tr.tasks) != maxTasks || tr.tasks[0].id != "c01" {
+		t.Fatalf("the first call was not evicted from the display list: %d tasks", len(tr.tasks))
+	}
+	b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Result, For: "c00"}, Body: []byte("attach: /tmp/image.png")})
+	if !tr.attachmentExpected {
+		t.Fatal("an evicted call's result lost the attachment intent")
 	}
 }
 
@@ -106,6 +127,18 @@ func TestShellEchoCannotFinishAsDelivery(t *testing.T) {
 	}
 }
 
+func TestUndeliveredQuoteFailsTheTurn(t *testing.T) {
+	b, c := testCore(t)
+	c.sendErr = errors.New("chat down")
+	tr := &turn{start: time.Now(), asked: []string{"question"}}
+	b.relay("slack:C1/1.0", "abcd1234", tr, statefile.Record{Header: statefile.Header{Kind: statefile.Message, Via: "cli", Type: "text/plain"}, Body: []byte("a status from elsewhere")})
+	c.sendErr = nil
+	b.finish("slack:C1/1.0", "abcd1234", tr, "")
+	if c.statuses[len(c.statuses)-1].outcome != "failed" {
+		t.Fatal("a lost quote did not fail the turn")
+	}
+}
+
 func TestDeliveryCorrectionDoesNotLoop(t *testing.T) {
 	b, c := testCore(t)
 	tr := &turn{start: time.Now(), attachmentExpected: true, deliveryRecovery: true, text: []string{"I've sent it."}, asked: []string{"question"}}
@@ -151,14 +184,26 @@ func TestFinishWaitsForDeliveryAndPropagatesFailure(t *testing.T) {
 
 func TestDeliveryFactsSurviveAdvanceAndReload(t *testing.T) {
 	b, _ := testCore(t)
-	tr := &turn{attachmentExpected: true, deliveryRecovery: true}
+	tr := &turn{
+		attachmentExpected: true, deliveryRecovery: true,
+		actionReceipt: "https://example.slack.com/confirmed", actionFailed: false,
+		attaching: map[string]bool{"c1": true}, sending: map[string]bool{"c2": true},
+	}
 	b.deliveryState("slack:C1/1.0", "abcd1234", tr)
 	b.advance("slack:C1/1.0", "abcd1234", 100)
 	b.bind("slack:C1/1.0", "abcd1234", 101)
 	reloaded := &bridge{path: b.path}
 	reloaded.load()
-	if got := reloaded.st.Threads["slack:C1/1.0"]; !got.AttachmentPending || !got.AttachmentRecovery || got.N != 101 {
-		t.Fatalf("lost pending delivery: %+v", got)
+	got := reloaded.st.Threads["slack:C1/1.0"]
+	if !got.AttachmentPending || !got.AttachmentRecovery || got.N != 101 ||
+		got.ActionReceipt != tr.actionReceipt || !slices.Equal(got.Attaching, []string{"c1"}) || !slices.Equal(got.Sending, []string{"c2"}) {
+		t.Fatalf("lost delivery facts: %+v", got)
+	}
+	cleared := &turn{}
+	b.deliveryState("slack:C1/1.0", "abcd1234", cleared)
+	if again := b.st.Threads["slack:C1/1.0"]; again.AttachmentPending || again.AttachmentRecovery ||
+		again.ActionReceipt != "" || again.Attaching != nil || again.Sending != nil {
+		t.Fatalf("a finished turn kept delivery facts: %+v", again)
 	}
 	b.bind("slack:C1/1.0", "eeeeeeee", 0)
 	if b.st.Threads["slack:C1/1.0"].AttachmentPending {

@@ -103,7 +103,7 @@ func (d *discord) replay(c *discordgo.Channel) {
 	after, ok := d.b.lastSeen(d.key(c.ID))
 	if !ok {
 		if c.LastMessageID != "" {
-			d.b.fresh(d.key(c.ID), c.LastMessageID)
+			d.b.mark(d.key(c.ID), c.LastMessageID)
 		}
 		return
 	}
@@ -124,7 +124,7 @@ func (d *discord) replay(c *discordgo.Channel) {
 }
 
 func (d *discord) handle(m *discordgo.Message) {
-	if !d.b.fresh(d.key(m.ChannelID), m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != d.tester {
+	if !d.b.unseen(d.key(m.ChannelID), m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != d.tester {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
@@ -145,7 +145,7 @@ func (d *discord) handle(m *discordgo.Message) {
 			label = m.Attachments[0].Filename // a message with only files
 		}
 		open := func(id string) (string, error) {
-			th, err := d.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(label, 80), AutoArchiveDuration: 10080})
+			th, err := d.dc.MessageThreadStartComplex(m.ChannelID, m.ID, &discordgo.ThreadStart{Name: threadTitle(id, label), AutoArchiveDuration: 10080})
 			if err != nil {
 				return "", err
 			}
@@ -153,12 +153,16 @@ func (d *discord) handle(m *discordgo.Message) {
 		}
 		if err := d.b.start("discord", open, m.ID, "", text, files); err != nil {
 			d.say(d.key(m.ChannelID), msg{Text: err.Error()})
+			return // nothing was delivered: catch-up after a restart reads it again
 		}
+		d.b.mark(d.key(m.ChannelID), m.ID)
 		return
 	}
 	th := d.key(ch.ID)
 	if id := cmp.Or(d.b.sessionFor(th), sessionOf(ch.Name)); id != "" {
-		d.b.message(th, id, m.ID, text, files)
+		if err := d.b.message(th, id, m.ID, text, files); err == nil {
+			d.b.mark(d.key(m.ChannelID), m.ID)
+		}
 	}
 }
 
@@ -166,6 +170,8 @@ func (d *discord) handle(m *discordgo.Message) {
 // "stop:<id>" is !stop on session id, and "model:<id>" picking m is
 // !model m. The message the component is on stands for the person's. It is
 // acked here, in the gateway's goroutine, and run in turn with the messages.
+// A control naming a session the thread no longer shows is refused, as Slack
+// refuses it: the thread would answer for a session it has left.
 func (d *discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent {
 		return
@@ -174,6 +180,15 @@ func (d *discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	action, id, _ := strings.Cut(data.CustomID, ":")
 	for _, v := range data.Values {
 		action += " " + v
+	}
+	if id != d.b.sessionFor(d.key(i.ChannelID)) {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{Content: staleControl, Flags: discordgo.MessageFlagsEphemeral},
+		}); err != nil {
+			log.Printf("interaction: %v", err)
+		}
+		return
 	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
 		log.Printf("interaction: %v", err)
@@ -197,7 +212,7 @@ func (d *discord) mirror(id, from, model, first string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	th, err := d.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: id + " " + firstWords(first, 80), AutoArchiveDuration: 10080})
+	th, err := d.dc.MessageThreadStartComplex(channel, m.ID, &discordgo.ThreadStart{Name: threadTitle(id, first), AutoArchiveDuration: 10080})
 	if err != nil {
 		return "", err
 	}
