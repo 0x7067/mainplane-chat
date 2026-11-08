@@ -56,6 +56,10 @@ type bridge struct {
 	st        state
 }
 
+// staleControl is what a Retry button or model picker says when the thread
+// shows another session than the one the control was posted with.
+const staleControl = "This control belongs to a previous session. Use !retry or !model in this thread for the current session."
+
 // chat is what the core needs of a chat app. th is a thread's key.
 type chat interface {
 	say(th string, m msg) error

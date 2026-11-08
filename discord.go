@@ -170,6 +170,8 @@ func (d *discord) handle(m *discordgo.Message) {
 // "stop:<id>" is !stop on session id, and "model:<id>" picking m is
 // !model m. The message the component is on stands for the person's. It is
 // acked here, in the gateway's goroutine, and run in turn with the messages.
+// A control naming a session the thread no longer shows is refused, as Slack
+// refuses it: the thread would answer for a session it has left.
 func (d *discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCreate) {
 	if i.Type != discordgo.InteractionMessageComponent {
 		return
@@ -178,6 +180,15 @@ func (d *discord) onInteraction(s *discordgo.Session, i *discordgo.InteractionCr
 	action, id, _ := strings.Cut(data.CustomID, ":")
 	for _, v := range data.Values {
 		action += " " + v
+	}
+	if id != d.b.sessionFor(d.key(i.ChannelID)) {
+		if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{
+			Type: discordgo.InteractionResponseChannelMessageWithSource,
+			Data: &discordgo.InteractionResponseData{Content: staleControl, Flags: discordgo.MessageFlagsEphemeral},
+		}); err != nil {
+			log.Printf("interaction: %v", err)
+		}
+		return
 	}
 	if err := s.InteractionRespond(i.Interaction, &discordgo.InteractionResponse{Type: discordgo.InteractionResponseDeferredMessageUpdate}); err != nil {
 		log.Printf("interaction: %v", err)

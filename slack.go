@@ -207,7 +207,7 @@ func (s *slackChat) act(cb slack.InteractionCallback) {
 	th := s.thread(cb.Container.ChannelID, cb.Container.ThreadTs)
 	for _, a := range cb.ActionCallback.BlockActions {
 		if a.BlockID != s.b.sessionFor(th) {
-			s.say(th, msg{Note: "This control belongs to a previous session. Use !retry or !model in this thread for the current session."})
+			s.say(th, msg{Note: staleControl})
 			continue
 		}
 		text := "!" + a.ActionID
