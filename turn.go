@@ -46,7 +46,14 @@ func (b *bridge) follow(th, id string, n int) {
 	}
 	go func() {
 		defer func() { b.mu.Lock(); delete(b.following, k); b.mu.Unlock() }()
-		t := turn{attachmentExpected: saved.AttachmentPending, deliveryRecovery: saved.AttachmentRecovery}
+		t := turn{
+			attachmentExpected: saved.AttachmentPending,
+			deliveryRecovery:   saved.AttachmentRecovery,
+			actionReceipt:      saved.ActionReceipt,
+			actionFailed:       saved.ActionFailed,
+			attaching:          setOf(saved.Attaching),
+			sending:            setOf(saved.Sending),
+		}
 		for {
 			// Calls not shown yet, held back by the status throttle, show after a
 			// short poll at most.
@@ -202,6 +209,7 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		if slackActionCall(r.Body) {
 			t.sending[r.ID] = true
 		}
+		b.deliveryState(th, id, t)
 		t.dirty = true
 	case statefile.Result:
 		b.mu.Lock()
@@ -230,10 +238,10 @@ func (b *bridge) relay(th, id string, t *turn, r statefile.Record) {
 		}
 		if ok := (r.Exit != nil && *r.Exit == 0) || (r.Exit == nil && !bytes.HasPrefix(r.Body, []byte("error: "))); ok && t.attaching[r.For] && hasAttachment(string(r.Body)) {
 			t.attachmentExpected = true
-			b.deliveryState(th, id, t)
 		}
 		delete(t.sending, r.For)
 		delete(t.attaching, r.For)
+		b.deliveryState(th, id, t)
 	}
 }
 
@@ -298,6 +306,9 @@ func (b *bridge) finish(th, id string, t *turn, outcome string) {
 	b.chat(th).status(th, id, t)
 	if outcome != "continued" {
 		t.attachmentExpected, t.deliveryRecovery = false, false
+		t.actionReceipt, t.actionFailed = "", false
+		clear(t.attaching)
+		clear(t.sending)
 	}
 	b.deliveryState(th, id, t)
 	*t = turn{}

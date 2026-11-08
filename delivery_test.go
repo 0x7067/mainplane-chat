@@ -172,14 +172,26 @@ func TestFinishWaitsForDeliveryAndPropagatesFailure(t *testing.T) {
 
 func TestDeliveryFactsSurviveAdvanceAndReload(t *testing.T) {
 	b, _ := testCore(t)
-	tr := &turn{attachmentExpected: true, deliveryRecovery: true}
+	tr := &turn{
+		attachmentExpected: true, deliveryRecovery: true,
+		actionReceipt: "https://example.slack.com/confirmed", actionFailed: false,
+		attaching: map[string]bool{"c1": true}, sending: map[string]bool{"c2": true},
+	}
 	b.deliveryState("slack:C1/1.0", "abcd1234", tr)
 	b.advance("slack:C1/1.0", "abcd1234", 100)
 	b.bind("slack:C1/1.0", "abcd1234", 101)
 	reloaded := &bridge{path: b.path}
 	reloaded.load()
-	if got := reloaded.st.Threads["slack:C1/1.0"]; !got.AttachmentPending || !got.AttachmentRecovery || got.N != 101 {
-		t.Fatalf("lost pending delivery: %+v", got)
+	got := reloaded.st.Threads["slack:C1/1.0"]
+	if !got.AttachmentPending || !got.AttachmentRecovery || got.N != 101 ||
+		got.ActionReceipt != tr.actionReceipt || !slices.Equal(got.Attaching, []string{"c1"}) || !slices.Equal(got.Sending, []string{"c2"}) {
+		t.Fatalf("lost delivery facts: %+v", got)
+	}
+	cleared := &turn{}
+	b.deliveryState("slack:C1/1.0", "abcd1234", cleared)
+	if again := b.st.Threads["slack:C1/1.0"]; again.AttachmentPending || again.AttachmentRecovery ||
+		again.ActionReceipt != "" || again.Attaching != nil || again.Sending != nil {
+		t.Fatalf("a finished turn kept delivery facts: %+v", again)
 	}
 	b.bind("slack:C1/1.0", "eeeeeeee", 0)
 	if b.st.Threads["slack:C1/1.0"].AttachmentPending {

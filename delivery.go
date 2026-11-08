@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -181,16 +182,48 @@ func slackActionCall(body []byte) bool {
 	return false
 }
 
-// Persist only delivery facts, so restarting between a tool result and the
-// final response cannot turn an unsent attachment into a successful turn.
+// Persist the turn's delivery facts, so restarting between a tool call and
+// its result, or between a result and the final response, can neither turn
+// an unsent attachment into a successful turn nor lose a sender receipt.
 func (b *bridge) deliveryState(th, id string, t *turn) {
+	attaching, sending := ids(t.attaching), ids(t.sending)
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	current, ok := b.st.Threads[th]
-	if !ok || current.Session != id || current.AttachmentPending == t.attachmentExpected && current.AttachmentRecovery == t.deliveryRecovery {
+	if !ok || current.Session != id ||
+		current.AttachmentPending == t.attachmentExpected && current.AttachmentRecovery == t.deliveryRecovery &&
+			current.ActionReceipt == t.actionReceipt && current.ActionFailed == t.actionFailed &&
+			slices.Equal(current.Attaching, attaching) && slices.Equal(current.Sending, sending) {
 		return
 	}
 	current.AttachmentPending, current.AttachmentRecovery = t.attachmentExpected, t.deliveryRecovery
+	current.Attaching, current.Sending = attaching, sending
+	current.ActionReceipt, current.ActionFailed = t.actionReceipt, t.actionFailed
 	b.st.Threads[th] = current
 	b.save()
+}
+
+// ids is the sorted ids a set holds, nil when it holds none.
+func ids(set map[string]bool) []string {
+	if len(set) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(set))
+	for k := range set {
+		out = append(out, k)
+	}
+	slices.Sort(out)
+	return out
+}
+
+// setOf is the set of ids.
+func setOf(ids []string) map[string]bool {
+	if len(ids) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(ids))
+	for _, id := range ids {
+		set[id] = true
+	}
+	return set
 }

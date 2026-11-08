@@ -20,11 +20,15 @@ type state struct {
 }
 
 type thread struct {
-	Session            string `json:"session"`
-	N                  int    `json:"n"` // the newest record relayed
-	AttachmentPending  bool   `json:"attachment_pending,omitempty"`
-	AttachmentRecovery bool   `json:"attachment_recovery,omitempty"`
-	Request            string `json:"request,omitempty"` // latest genuine chat request; stable through auto-continuation
+	Session            string   `json:"session"`
+	N                  int      `json:"n"` // the newest record relayed
+	AttachmentPending  bool     `json:"attachment_pending,omitempty"`
+	AttachmentRecovery bool     `json:"attachment_recovery,omitempty"`
+	Attaching          []string `json:"attaching,omitempty"`      // run calls that printed an attach directive, their results not yet seen
+	Sending            []string `json:"sending,omitempty"`        // run calls that ran the Slack sender, their results not yet seen
+	ActionReceipt      string   `json:"action_receipt,omitempty"` // a confirmed sender action of the open turn
+	ActionFailed       bool     `json:"action_failed,omitempty"`  // a sender action of the open turn returned no receipt
+	Request            string   `json:"request,omitempty"`        // latest genuine chat request; stable through auto-continuation
 }
 
 func (b *bridge) threadsShowing(id string) []string {
