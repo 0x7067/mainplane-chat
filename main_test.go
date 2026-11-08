@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -35,6 +37,25 @@ func TestPickModel(t *testing.T) {
 		if got := pickModel(cat, ids, s); got != want {
 			t.Errorf("pickModel(%q) = %q, want %q", s, got, want)
 		}
+	}
+}
+
+func TestFailedPostLeavesMessageForCatchUp(t *testing.T) {
+	b, _ := testCore(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "harness down", http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	b.harness = srv.URL
+	if err := b.message("slack:C1/1.0", "abcd1234", "m1", "hi", nil); err == nil {
+		t.Fatal("a failed post reported success")
+	}
+	if !b.unseen("slack:C1", "m1") {
+		t.Fatal("an undelivered message was marked handled")
+	}
+	b.mark("slack:C1", "m1")
+	if b.unseen("slack:C1", "m1") {
+		t.Fatal("a marked message is still unseen")
 	}
 }
 

@@ -171,11 +171,13 @@ func (b *bridge) chat(th string) chat { return b.chats[platform(th)] }
 func (b *bridge) say(th string, m msg) error { return b.chat(th).say(th, m) }
 
 // message handles a message sent in thread th, which shows session id: a
-// thread command, else a message to the session.
-func (b *bridge) message(th, id, msgID, text string, files []file) {
-	if !b.command(th, id, msgID, text) {
-		b.post(th, id, msgID, "", text, files)
+// thread command, else a message to the session. It reports the post's
+// error, so the adapter can leave the message for catch-up to retry.
+func (b *bridge) message(th, id, msgID, text string, files []file) error {
+	if b.command(th, id, msgID, text) {
+		return nil
 	}
+	return b.post(th, id, msgID, "", text, files)
 }
 
 // command runs a thread command and reports whether text was one. /model and
@@ -252,8 +254,7 @@ func (b *bridge) start(via string, open func(id string) (string, error), msgID, 
 		return fmt.Errorf("session %s started, but the thread failed: %w", id, err)
 	}
 	b.bind(th, id, 0)
-	b.post(th, id, msgID, prefix, text, files)
-	return nil
+	return b.post(th, id, msgID, prefix, text, files)
 }
 
 // newConf is the config of a new session (choices.startConf, from startBase),

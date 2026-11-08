@@ -264,7 +264,7 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	}
 	root := cmp.Or(m.ThreadTimeStamp, m.TimeStamp)
 	th := s.thread(m.Channel, root)
-	if !hears(m.ChannelType, s.mention.MatchString(m.Text)) || !s.b.fresh(s.key(m.Channel), m.TimeStamp) {
+	if !hears(m.ChannelType, s.mention.MatchString(m.Text)) || !s.b.unseen(s.key(m.Channel), m.TimeStamp) {
 		return
 	}
 	// A user's message sent through another app, as slack-axi sends them, has
@@ -285,8 +285,10 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 		return
 	}
 	if id := s.b.sessionFor(th); id != "" {
-		if !s.b.command(th, id, m.TimeStamp, text) {
-			s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, false), text, files)
+		if s.b.command(th, id, m.TimeStamp, text) {
+			s.b.mark(s.key(m.Channel), m.TimeStamp)
+		} else if err := s.b.post(th, id, m.TimeStamp, s.framed(m.Channel, m.User, false), text, files); err == nil {
+			s.b.mark(s.key(m.Channel), m.TimeStamp)
 		}
 		return
 	}
@@ -310,7 +312,9 @@ func (s *slackChat) handle(m *slackevents.MessageEvent) {
 	}
 	if err := s.b.start("slack", open, m.TimeStamp, s.framed(m.Channel, m.User, true), text, files); err != nil {
 		s.say(th, msg{Text: err.Error()})
+		return // nothing was delivered: catch-up after a restart reads it again
 	}
+	s.b.mark(s.key(m.Channel), m.TimeStamp)
 }
 
 // files are a message's files, downloaded with the bot token when needed. A

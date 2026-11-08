@@ -103,7 +103,7 @@ func (d *discord) replay(c *discordgo.Channel) {
 	after, ok := d.b.lastSeen(d.key(c.ID))
 	if !ok {
 		if c.LastMessageID != "" {
-			d.b.fresh(d.key(c.ID), c.LastMessageID)
+			d.b.mark(d.key(c.ID), c.LastMessageID)
 		}
 		return
 	}
@@ -124,7 +124,7 @@ func (d *discord) replay(c *discordgo.Channel) {
 }
 
 func (d *discord) handle(m *discordgo.Message) {
-	if !d.b.fresh(d.key(m.ChannelID), m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != d.tester {
+	if !d.b.unseen(d.key(m.ChannelID), m.ID) || m.Author == nil || m.Author.Bot && m.Author.ID != d.tester {
 		return
 	}
 	text := strings.TrimSpace(m.Content)
@@ -153,12 +153,16 @@ func (d *discord) handle(m *discordgo.Message) {
 		}
 		if err := d.b.start("discord", open, m.ID, "", text, files); err != nil {
 			d.say(d.key(m.ChannelID), msg{Text: err.Error()})
+			return // nothing was delivered: catch-up after a restart reads it again
 		}
+		d.b.mark(d.key(m.ChannelID), m.ID)
 		return
 	}
 	th := d.key(ch.ID)
 	if id := cmp.Or(d.b.sessionFor(th), sessionOf(ch.Name)); id != "" {
-		d.b.message(th, id, m.ID, text, files)
+		if err := d.b.message(th, id, m.ID, text, files); err == nil {
+			d.b.mark(d.key(m.ChannelID), m.ID)
+		}
 	}
 }
 

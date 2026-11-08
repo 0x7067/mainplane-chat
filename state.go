@@ -96,17 +96,25 @@ func (b *bridge) lastSeen(ch string) (string, bool) {
 	return id, ok
 }
 
-// fresh reports whether message id is newer than every one handled in
-// channel ch, and marks it handled.
-func (b *bridge) fresh(ch, id string) bool {
+// unseen reports whether message id is newer than every one handled in
+// channel ch. mark says one was handled.
+func (b *bridge) unseen(ch, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return newer(id, b.st.Seen[ch])
+}
+
+// mark records message id as the newest message handled in channel ch. A
+// message the bridge could not deliver is not marked, so catch-up after a
+// restart reads it again; one delivered after it buries it either way.
+func (b *bridge) mark(ch, id string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	if !newer(id, b.st.Seen[ch]) {
-		return false
+		return
 	}
 	b.st.Seen[ch] = id
 	b.save()
-	return true
 }
 
 // newer compares message ids, which grow with time.
